@@ -264,7 +264,7 @@ ros2 topic echo /so101/joint_state   # watch positions + gripper effort
 ## Repository layout
 
 ```
-strix-vla-pipeline/
+workshops/vvla-pipeline/
 ├── bootstrap.sh                  # one-shot setup into a uv venv at ./.venv
 ├── run_pipeline.sh               # entry point: starts camera + arm nodes, then the orchestrator
 ├── config/
@@ -316,15 +316,19 @@ strix-vla-pipeline/
 ## Installation
 Install Ubuntu 24.04.4
 
+All commands below run from this workshop directory (`workshops/vvla-pipeline/`)
+of your `embedded-x86-ai` checkout.
+
+Download Ryzen AI 1.7.1 from
+https://account.amd.com/en/forms/downloads/xef.html?filename=ryzen_ai-1.7.1.tgz
+and untar it into this directory, so you have `workshops/vvla-pipeline/ryzen_ai-1.7.1/`.
+
 ```bash
-git clone <this-repo> aai-vla-pipeline
-cd aai-vla-pipeline
-Download: https://account.amd.com/en/forms/downloads/xef.html?filename=ryzen_ai-1.7.1.tgz
-Untar into the repository root
+cd embedded-x86-ai/workshops/vvla-pipeline
+tar -xzf ~/Downloads/ryzen_ai-1.7.1.tgz
 
 # Point at your Ryzen AI 1.7.1 wheel directory so the NPU EP gets installed.
 # Without it, everything falls back to the CPU execution provider.
-
 export RYZEN_AI_WHEELS=./ryzen_ai-1.7.1
 
 ./bootstrap.sh

@@ -353,7 +353,7 @@ and export the models as part of setup:
 
 ```bash
 source .venv/bin/activate
-pip install ultralytics
+uv pip install ultralytics
 python scripts/export_yolo26s_pose.py
 python scripts/export_yolo26s_detect.py
 ```
@@ -556,6 +556,6 @@ All tunables live in `config/pipeline.yaml`:
 - **llama-server segfaults during "warming up the model"** — a gfx1151 ROCm kernel-dispatch issue. The pipeline sets `HSA_OVERRIDE_GFX_VERSION` automatically; if it persists, set `llm.no_warmup: true`.
 - **Arm doesn't move** — verify `motor_port` permissions and that your calibration JSON matches `robot_id`.
 - **Gripper trips `Overload error` on shutdown** — usually a side effect of an abnormal exit while the arm was parking; once the run exits cleanly it goes away. If it recurs, power-cycle the servo bus to clear the overload latch before the next run.
-- **Voice latency feels high / onsets clipped** — `pip install webrtcvad` for the better VAD backend; tune `audio.vad.hangover_s` and `pre_roll_s`.
+- **Voice latency feels high / onsets clipped** — `uv pip install webrtcvad` (inside `.venv`) for the better VAD backend; tune `audio.vad.hangover_s` and `pre_roll_s`.
 - **Gripper drops thin objects** — raise `grip.stall_grace_s` and/or lower `grip.load_threshold`; verify effort feedback with `python -m vla_pipeline.robot.arm_interface --dry-run` (prints whether the gripper load register is readable).
 - **Arm camera image is sideways** — set `cameras.arm.rotate` (0/90/180/270) to match the end-effector mounting.

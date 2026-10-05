@@ -84,8 +84,8 @@ def build_npu_session(
     onnx_path = resolve(onnx_path)
     if not onnx_path.exists():
         raise FileNotFoundError(
-            f"{onnx_path} not found - run the repo's bootstrap (model export "
-            "step) or point the config at your model files."
+            f"{onnx_path} not found - export and compile the YOLO models (see "
+            "workshops/vvla-pipeline/README.md) or point the config at your model files."
         )
 
     # >>> TODO 1.2: build_npu_session - notebooks/01_ai_models/01_npu_yolo.ipynb

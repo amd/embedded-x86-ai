@@ -35,8 +35,8 @@ the **pipeline's control flow**, it's yours.
 ## Student happy path
 
 ```bash
-./bootstrap.sh                            # 0) once, from the repo root: builds the
-                                          #    .venv the workshop kernel runs on
+# 0) once: machine setup from ../README.md - bootstrap.sh, YOLO export,
+#    NPU compile. Builds the .venv the workshop kernel runs on.
 cd workshop
 ./run_notebooks.sh                        # 1) registers the kernel on that venv,
                                           #    installs missing deps, starts the

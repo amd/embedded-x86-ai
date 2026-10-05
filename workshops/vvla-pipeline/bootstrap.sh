@@ -8,7 +8,7 @@
 # content has been reviewed and validated by the authors.
 
 # =============================================================================
-# bootstrap.sh - one-shot setup for the Strix VLA pipeline
+# bootstrap.sh - one-shot setup for the Ryzen AI VVLA workshop
 #
 # Target system: AMD Ryzen AI APU (arch auto-detected - e.g. Strix Point /
 #                Radeon 890M = gfx1150, Strix Halo = gfx1151) · Ubuntu 24.04
@@ -24,23 +24,21 @@
 #      (--system-site-packages so the ROS 2 Jazzy python stack stays importable)
 #   3. Installs Python deps into the venv:
 #        - PyTorch ROCm wheels for the DETECTED arch (AMD repo)
-#        - LeRobot [feetech] from source, MediaPipe, Whisper deps, etc.
+#        - LeRobot [feetech] from source, MediaPipe, Jupyter kernel deps, etc.
 #        - Ryzen AI onnxruntime (VitisAI EP) from $RYZEN_AI_WHEELS - installed
 #          LAST (section 4c) so nothing clobbers it; ROCm is never used for
 #          onnxruntime (llama.cpp + torch only)
 #   4. Builds llama.cpp with HIP/ROCm for the DETECTED arch into third_party/
-#   5. Downloads / exports the models:
-#        - Whisper-base → ONNX encoder/decoder      (scripts/export_whisper_onnx.py)
-#        - YOLOv26s-pose → ONNX FP32                (scripts/export_yolo26s_pose.py)
-#        - YOLOv26s-detect → ONNX FP32              (scripts/export_yolo26s_detect.py)
-#        - Llama-3.2-3B-Instruct GGUF Q4_K_M        (hf download)
+#   5. Downloads the Llama-3.2-3B-Instruct GGUF Q4_K_M (hf download). The YOLO
+#      ONNX export is a separate README step (scripts/export_yolo26s_*.py).
+#   5b. Compiles the exported YOLO models for the NPU into cache/
 #   6. Verifies the environment and prints next steps
 #
 # Flags:
 #   --skip-apt      don't run apt (no sudo needed)
 #   --skip-llama    don't clone/build llama.cpp
 #   --skip-models   don't download/export models
-#   --skip-compile  don't compile NPU models (whisper/yolo) even if SDK venv present
+#   --skip-compile  don't compile NPU models (yolo) even if SDK venv present
 #   --cpu-only      no ROCm torch / no NPU wheels (dev machines; everything
 #                   still runs with --device cpu and --dry-run)
 # =============================================================================
@@ -93,7 +91,7 @@ for arg in "$@"; do
   esac
 done
 
-# Full Ryzen AI SDK venv used to COMPILE NPU models (whisper + yolo pose/detect). The
+# Full Ryzen AI SDK venv used to COMPILE NPU models (yolo pose/detect). The
 # deployment .venv can only RUN precompiled models. This venv is installed at
 # the repo root (./ryzenai-compile) by bootstrap's compile step, using the
 # install_ryzen_ai.sh shipped in the SDK wheel directory (./ryzen_ai*).
@@ -243,11 +241,11 @@ if [[ "$CPU_ONLY" -eq 0 ]]; then
   fi
 fi
 
-# Persist the HSA override so llama-server (spawned by vla_pipeline.llm.*) finds
-# it in every shell. It is appended to scripts/ryzen_ai_env.sh - the env file the
-# pipeline already sources - guarded so re-running bootstrap never duplicates it.
+# Persist the HSA override so llama-server (started by workshop/run_notebooks.sh)
+# finds it in every shell. It is appended to scripts/ryzen_ai_env.sh - the env file
+# the workshop already sources - guarded so re-running bootstrap never duplicates it.
 # Scope note: HSA_OVERRIDE_GFX_VERSION only affects the ROCm/HIP GPU runtime
-# (llama.cpp, and torch-on-GPU which this pipeline does not use at inference
+# (llama.cpp, and torch-on-GPU which the workshop does not use at inference
 # time). The XDNA2 NPU (VitisAI EP) and all ONNX paths are unaffected.
 if [[ "$CPU_ONLY" -eq 0 && -n "${HSA_OVERRIDE_FOR_LLAMA:-}" ]]; then
   ENV_SH="${REPO_ROOT}/scripts/ryzen_ai_env.sh"
@@ -516,18 +514,6 @@ uv pip install 'opencv-contrib-python>=4.10' 'numpy<2' \
 if [[ "$SKIP_MODELS" -eq 0 ]]; then
   mkdir -p "$MODELS_DIR" "$LLAMA_OUT_DIR" "${REPO_ROOT}/cache" "${REPO_ROOT}/logs"
 
-  log "Pre-downloading NPU-optimized Whisper ONNX (amd/whisper-base-en-onnx-npu)"
-  PYTHONPATH="${REPO_ROOT}" python - <<'PY' || warn "Whisper ONNX pre-download failed - it will be retried on first run; or set whisper.encoder_onnx/decoder_onnx in config/pipeline.yaml to local files (e.g. exported via scripts/export_whisper_onnx.py)."
-from vla_pipeline.audio.whisper_npu import download_whisper_onnx
-from vla_pipeline.utils.config import load_config, resolve
-cfg = load_config()
-mt = cfg["whisper"].get("model_type", "whisper-base")
-dest = resolve(cfg.get("system", {}).get("models_dir", "models")) / mt
-enc, dec = download_whisper_onnx(mt, dest_dir=dest)
-print("encoder:", enc)
-print("decoder:", dec)
-PY
-
   log "YOLO ONNX export is a manual setup step — see README"
 
   log "Downloading Llama-3.2-3B-Instruct GGUF (Q4_K_M)"
@@ -542,14 +528,14 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# 5b. Compile NPU models (whisper + yolo pose/detect) using the full Ryzen AI SDK venv
+# 5b. Compile NPU models (yolo pose/detect) using the full Ryzen AI SDK venv
 # -----------------------------------------------------------------------------
 # The deployment .venv can RUN precompiled NPU models but cannot COMPILE them.
 # Compilation needs the full SDK venv. bootstrap installs it at the repo root
 # (./ryzenai-compile) from the SDK wheel dir (./ryzen_ai*), then compiles every
 # exported model into cache/. If the SDK wheels aren't present it prints the
-# steps and continues (the pipeline still runs llama on the iGPU and can fall
-# back to device: cpu for whisper/yolo).
+# steps and continues (llama still runs on the iGPU and the YOLO models can
+# fall back to device: cpu).
 if [[ "$SKIP_COMPILE" -eq 0 && "$CPU_ONLY" -eq 0 ]]; then
   # 1) Install the full SDK venv into the repo root if it isn't there yet.
   if [[ ! -x "${RYZEN_AI_COMPILE_VENV}/bin/python" ]]; then
@@ -574,7 +560,7 @@ if [[ "$SKIP_COMPILE" -eq 0 && "$CPU_ONLY" -eq 0 ]]; then
   # shellcheck disable=SC1091
   source "${VENV_DIR}/bin/activate"
   if [[ -x "${RYZEN_AI_COMPILE_VENV}/bin/python" ]]; then
-    log "Compiling NPU models (whisper + yolo pose + yolo detect) with ${RYZEN_AI_COMPILE_VENV}"
+    log "Compiling NPU models (yolo pose + yolo detect) with ${RYZEN_AI_COMPILE_VENV}"
     # compile_npu_models.py self-sets LD_LIBRARY_PATH from its own venv and
     # re-execs, so the VitisAI EP loads correctly and a CPU fallback is treated
     # as a hard error (no silent no-op "compile").
@@ -596,7 +582,7 @@ if [[ "$SKIP_COMPILE" -eq 0 && "$CPU_ONLY" -eq 0 ]]; then
     fi
   else
     warn "No compiler venv at ${RYZEN_AI_COMPILE_VENV} - skipping NPU model compilation.
-       Until compiled, set whisper.device / yolo_pose.device / yolo_detect.device to 'cpu' in config to run."
+       Until compiled, set yolo_pose.device / yolo_detect.device to 'cpu' in workshop.yaml to run."
   fi
 else
   [[ "$SKIP_COMPILE" -eq 1 ]] && log "Skipping NPU model compilation (--skip-compile)"
@@ -612,7 +598,7 @@ python - <<'PY'
 import importlib, sys
 
 ok = True
-for mod in ("numpy", "cv2", "mediapipe", "onnxruntime", "transformers", "yaml", "psutil", "requests", "sounddevice"):
+for mod in ("numpy", "cv2", "mediapipe", "onnxruntime", "yaml", "requests"):
     try:
         importlib.import_module(mod)
         print(f"  [ok] {mod}")
@@ -686,41 +672,18 @@ cat <<EOF
 =============================================================================
  Bootstrap complete.
 =============================================================================
- Activate the environment (every new shell):
+ If you have not exported the YOLO models yet, do that now and rerun
+ bootstrap to compile them for the NPU (see README, "Installation").
 
-     source /opt/ros/jazzy/setup.bash      # if using the ROS 2 transport
-     source .venv/bin/activate
-     source scripts/ryzen_ai_env.sh        # NPU: puts voe/lib on LD_LIBRARY_PATH
-
- Component tests (each piece is independently verifiable):
-
-     python -m vla_pipeline.utils.resource_monitor
-     ./workshop/launch_monitor.sh                 # always-on-top CPU%/GPU%/NPU inf/s HUD (open/close anytime)
-     python -m vla_pipeline.audio.whisper_npu --input mic
-     python -m vla_pipeline.llm.llama_intent --selftest
-     python -m vla_pipeline.vision.yolo_pose_npu
-
-     # terminal 1: publisher
-     python -m vla_pipeline.vision.camera_node --role arm
-     # terminal 2: now the subscriber gets frames
-     python -m vla_pipeline.vision.yolo_detect_npu --find cup --role arm
-
-     python -m vla_pipeline.vision.mediapipe_hands
-     python -m vla_pipeline.robot.arm_interface --dry-run
-     python -m vla_pipeline.robot.robot_node --server --dry-run   # + --client-test
-     python -m vla_pipeline.robot.test_ros2_arm_motion
-     python -m vla_pipeline.behaviors.gesture_mimic --dry-run
-     python -m vla_pipeline.behaviors.fetch_block --dry-run
-     python -m vla_pipeline.behaviors.dance --dry-run
-     python -m vla_pipeline.behaviors.grip --dry-run
-
- Before first hardware run:
-   * Edit config/pipeline.yaml: motor_port (lerobot-find-port), robot_id,
-     camera.index, and teach behaviors.fetch_block.block_pose.
+ Before the first hardware run:
+   * Calibrate the arm: see calibration/ and arm_calibrator/README.md
+   * Set motor_port / robot_id / camera devices in
+     workshop/{project,solution}/config/workshop.yaml
    * Serial permissions: sudo chmod 666 /dev/ttyACM0   (resets on replug)
 
- Run the whole pipeline (single entry point):
+ Start the workshop (registers the kernel, starts llama-server, opens Jupyter):
 
-     ./run_pipeline.sh
+     cd workshop
+     ./run_notebooks.sh
 =============================================================================
 EOF

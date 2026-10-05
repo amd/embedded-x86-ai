@@ -68,10 +68,8 @@ JOINT_LIMITS = {
     "gripper": (38.0, 95.0),  # calibrated jaws: 43 closed, 95 open
 }
 
-# The full pipeline's hard backstop (vla_pipeline/robot/arm_interface.py) -
-# the widest envelope the deployed system ever allows. Used only to cap the
-# live-mimic extension below; the workshop is standalone, so the values are
-# mirrored here rather than imported.
+# Hard backstop - the widest envelope the deployed system ever allows. Used
+# only to cap the live-mimic extension below.
 _PIPELINE_BACKSTOP = {
     "shoulder_pan": (-115.0, 115.0),
     "shoulder_lift": (-120.0, 110.0),

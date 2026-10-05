@@ -1,13 +1,11 @@
 # =============================================================================
-# Workshop pipeline configuration - self-contained copy for the workshop
-# project. Values mirror the real pipeline config at the repository root
-# (config/pipeline.yaml) so what you build here drives the same hardware.
+# Workshop pipeline configuration - one copy each for project/ and solution/.
 #
 # All relative paths resolve against the PROJECT root (the directory that
-# contains this config/ folder). The model/cache paths below assume the
-# workshop/ directory sits inside the pipeline repository, so the ONNX
-# models, the GGUF, and the NPU compile cache are shared with the main
-# pipeline (../../models, ../../cache). Adjust if you move things.
+# contains this config/ folder). The model/cache paths below point at the
+# setup outputs in workshops/vvla-pipeline/ (../../models, ../../cache), which
+# bootstrap.sh and scripts/compile_npu_models.py produce. Adjust if you move
+# things.
 # =============================================================================
 
 system:

@@ -8,9 +8,8 @@
 """Export YOLOv26s (detection) to FP32 ONNX for the Ryzen AI NPU.
 
 Mirror of ``scripts/export_yolo26s_pose.py`` for the 80-class detection
-checkpoint used by voice pick-and-place
-(``vla_pipeline.vision.yolo_detect_npu``). Safe to re-run (skips if output
-exists).
+checkpoint used by the workshop's object detection (``models/vision.py``).
+Safe to re-run (skips if output exists).
 
     python scripts/export_yolo26s_detect.py [--out models/yolo26s]
 
@@ -98,7 +97,7 @@ def main() -> None:
     pt = out / PT_MODEL
     export_to_onnx(pt if pt.exists() else Path(PT_MODEL), onnx_out)
     validate(onnx_out)
-    print("\nDone - run: python -m vla_pipeline.vision.yolo_detect_npu --find ball")
+    print("\nDone - next: compile it for the NPU (see the README, 'Compile for the NPU').")
 
 
 if __name__ == "__main__":

@@ -1,30 +1,15 @@
-# Strix VLA pipeline - Python dependencies (installed by bootstrap.sh via uv)
-# Hardware-specific wheels (torch+ROCm gfx1151, Ryzen AI onnxruntime-vitisai)
+# Ryzen AI VVLA workshop - Python dependencies (installed by bootstrap.sh via uv)
+# Hardware-specific wheels (torch+ROCm, Ryzen AI onnxruntime-vitisai)
 # are installed separately by bootstrap.sh.
 
 numpy<2                    # onnxruntime + AMD wheels are built against numpy 1.x; 2.x crashes the ORT import
-opencv-contrib-python>=4.10  # GUI-enabled (cv2.imshow); bootstrap.sh re-pins this LAST and strips any -headless variant that mediapipe/ultralytics/optimum drag in
+opencv-contrib-python>=4.10  # GUI-enabled (cv2.imshow); bootstrap.sh re-pins this LAST and strips any -headless variant that mediapipe/ultralytics drag in
 mediapipe==0.10.21   # last release with the legacy mp.solutions API (removed in 0.10.30+)
 onnx>=1.16,<1.18           # VitisAI ORT supports IR <= 11; onnx 1.18+ emits IR 13
 onnxruntime>=1.18          # replaced by the Ryzen AI VitisAI wheel when RYZEN_AI_WHEELS is set
-transformers>=4.44
-soundfile>=0.13            # audio I/O (AMD ASR demo)
-# optimum / optimum-onnx are only needed for the fallback local export
-# (scripts/export_whisper_onnx.py); the default path downloads AMD's
-# pre-optimized ONNX from amd/whisper-*-onnx-npu instead.
-optimum>=1.21
-optimum-onnx
-sounddevice>=0.4.7
 pyyaml>=6.0
 requests>=2.31
-psutil>=5.9
-rich>=13.7
-beartype>=0.18
-huggingface_hub[cli]>=0.34,<1.0   # transformers requires hub <1.0, do NOT let uv resolve 1.x
-jiwer>=3.0                 # optional: WER/CER evaluation
-
-# --- VLA upgrade additions ---
-webrtcvad>=2.0.10          # optional but recommended: robust VAD backend (audio.vad.backend: auto)
+huggingface_hub[cli]>=0.34,<1.0   # `hf download` for the Llama GGUF; keep <1.0
 
 # --- Jupyter kernel (workshop notebooks) ---
 # Keep ipykernel on the 6.x line. ipykernel 7.x removed Kernel.do_one_iteration(),

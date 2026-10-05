@@ -92,7 +92,7 @@ def main() -> None:
     pt = out / PT_MODEL
     export_to_onnx(pt if pt.exists() else Path(PT_MODEL), onnx_out)
     validate(onnx_out)
-    print("\nDone - run: python -m vla_pipeline.vision.yolo_pose_npu")
+    print("\nDone - next: compile it for the NPU (see the README, 'Compile for the NPU').")
 
 
 if __name__ == "__main__":

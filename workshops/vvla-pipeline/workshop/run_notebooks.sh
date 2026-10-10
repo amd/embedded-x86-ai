@@ -294,6 +294,26 @@ if [[ "$NO_LAUNCH" -eq 1 ]]; then
   exit 0
 fi
 
+# A live camera cell holds /dev/video0 in its kernel. Jupyter leaves that
+# kernel running when the notebook tab is closed, so the next notebook cannot
+# open the AMD ISP camera until this whole script is restarted. Shut the
+# kernel down with the notebook instead.
+LAB_OVERRIDES="${VENV_DIR}/share/jupyter/lab/settings/overrides.json"
+mkdir -p "$(dirname "$LAB_OVERRIDES")"
+"$PY" - "$LAB_OVERRIDES" <<'PY'
+import json, sys
+path = sys.argv[1]
+try:
+    with open(path) as fh:
+        data = json.load(fh)
+except FileNotFoundError:
+    data = {}
+data.setdefault("@jupyterlab/notebook-extension:tracker", {})["kernelShutdown"] = True
+with open(path, "w") as fh:
+    json.dump(data, fh, indent=2)
+    fh.write("\n")
+PY
+
 say "Launching Jupyter ${LAUNCHER} - the workshop kernel is auto-selected"
 cd "$WORKSHOP_DIR"
 # Not exec'd: keep this shell alive so the trap tears the llama server down

@@ -325,24 +325,20 @@ tar -xvzf ryzen_ai-1.7.1.tgz
 source /opt/xilinx/xrt/setup.sh
 ```
 
-`$PWD/venv` is `~/ryzen_ai-1.7.1/venv`. Then clone this repository once. The NPU compile cache is not in git. A fresh clone exports the YOLO models, then compiles them:
+`$PWD/venv` is `~/ryzen_ai-1.7.1/venv`. Then clone this repository once. The NPU compile cache is not in git. `./bootstrap.sh` exports the YOLO ONNX files and, when the SDK venv is present, compiles them:
 
 ```bash
 git clone https://github.com/amd/embedded-x86-ai
 export RYZEN_AI_WHEELS=~/ryzen_ai-1.7.1
 cd embedded-x86-ai/workshops/vvla-pipeline
-./bootstrap.sh --skip-compile
-source .venv/bin/activate
-pip install 'ultralytics' 'numpy==1.26.4' 'opencv-contrib-python==4.11.0.86'
-python scripts/export_yolo26s_pose.py
-python scripts/export_yolo26s_detect.py
-deactivate
-./bootstrap.sh --skip-apt --skip-llama --skip-models
+./bootstrap.sh
 source .venv/bin/activate
 source scripts/ryzen_ai_env.sh
 ```
 
-The first `bootstrap.sh` creates `.venv` and downloads the Whisper ONNX. `--skip-compile` is only for that pass, because the YOLO ONNX files do not exist yet. The second `bootstrap.sh` compiles Whisper, YOLO-pose, and YOLO-detect into `cache/`. Those `.rai` files stay on the machine. Do not clone this repository again inside the workshop, and do not unpack the SDK into the repository.
+`./bootstrap.sh` creates `.venv`, downloads Whisper and the Llama GGUF, and exports `models/yolo26s-pose/yolo26s-pose.onnx` and `models/yolo26s/yolo26s.onnx`. It then compiles Whisper, YOLO-pose, and YOLO-detect into `cache/`. Those `.rai` files stay on the machine. Do not clone this repository again inside the workshop, and do not unpack the SDK into the repository.
+
+The NPU compile is the slow part of bootstrap. It runs once per model, and the log scrolls through VAIML tiling output the whole time. On a Ryzen AI APU with Ryzen AI SW 1.7.1, YOLOv26s-pose took about 16 minutes and YOLOv26s-detect about 3 minutes. That run reused an existing Whisper cache, so the two YOLO models took about 20 minutes. Whisper adds its own compile time on a first run. Once `cache/` holds a model's `.rai`, later sessions load it in about a second.
 
 When `cache/` already contains the `.rai` files, skip the export and the compile:
 
@@ -360,17 +356,17 @@ export RYZEN_AI_WHEELS=~/ryzen_ai-1.7.1
 5. Ryzen AI onnxruntime (VitisAI EP) from `$RYZEN_AI_WHEELS`
 6. LeRobot 0.5.2 `[feetech]` from source → `third_party/lerobot`
 7. llama.cpp HIP build (`-DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1100`, `llama-server`) → `third_party/llama.cpp`
-8. Model downloads: Llama-3.2-3B-Instruct Q4_K_M GGUF, AMD NPU-optimized Whisper-base ONNX. YOLO ONNX must be exported manually — see "Export the YOLO models" below.
+8. Model downloads: Llama-3.2-3B-Instruct Q4_K_M GGUF, AMD NPU-optimized Whisper-base ONNX, and the YOLOv26s-pose and YOLOv26s-detect ONNX exports (`scripts/export_yolo26s_pose.py`, `scripts/export_yolo26s_detect.py`).
 9. Installs ROS2 Jazzy if it doesn't exist
 
 Flags: `--skip-apt`, `--skip-llama`, `--skip-models`, `--skip-compile`,
-`--cpu-only` (dev machine without ROCm/NPU). `--skip-compile` skips the NPU build. Use it on the first pass above, and again when `cache/*.rai` is already present. The compile pass omits `--skip-compile` and writes `cache/`.
+`--cpu-only` (dev machine without ROCm/NPU). `--skip-compile` skips the NPU build. Use it when `cache/*.rai` is already present. A run without `--skip-compile` writes `cache/`.
 
 > **Note:** `meta-llama/Llama-3.2-3B-Instruct` is gated; the script downloads the community Q4_K_M GGUF and prints a warning with manual instructions if the download requires authentication (`hf auth login`).
 
 ### NPU cache
 
-`cache/` is gitignored. The second `bootstrap.sh` above builds it:
+`cache/` is gitignored. `./bootstrap.sh` builds it (YOLO-pose about 16 minutes, YOLO-detect about 3 minutes):
 
 ```text
 cache/whisper_base_encoder/whisper_base_encoder.rai

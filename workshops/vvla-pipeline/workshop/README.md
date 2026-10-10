@@ -34,9 +34,13 @@ the **pipeline's control flow**, it's yours.
 
 ## Student happy path
 
+Before step 0, install the Ryzen AI SDK and prerequisites as described in [Installation](../README.md#installation).
+
 ```bash
 ./bootstrap.sh                            # 0) once, from the repo root: builds the
-                                          #    .venv the workshop kernel runs on
+                                          #    .venv the workshop kernel runs on,
+                                          #    exports the YOLO models, and compiles
+                                          #    them for the NPU (~20 min for both YOLOs)
 cd workshop
 ./run_notebooks.sh                        # 1) registers the kernel on that venv,
                                           #    installs missing deps, starts the

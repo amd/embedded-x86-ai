@@ -12,9 +12,16 @@ in any YOLO project - nothing here is AMD- or ROS-specific, which is exactly
 why it is provided instead of being a TODO. Read it once so you know what the
 helpers hand you; then spend your time on the NPU/ROS/wiring TODOs.
 
-Model heads (from the reference exports, end-to-end, no NMS needed):
-- YOLOv26s-pose:   output ``[1, 300, 57]``  = xyxy, score, class, 17*(x, y, v)
-- YOLOv26s-detect: output ``[1, 300, 6]``   = xyxy, score, class
+Model heads. An end-to-end export needs no NMS:
+
+- YOLOv26s-pose:   ``[1, 300, 57]`` = xyxy, score, class, 17*(x, y, v)
+- YOLOv26s-detect: ``[1, 300, 6]``  = xyxy, score, class
+
+The default ultralytics ONNX export leaves the raw head instead (``nms``
+defaults to ``None``, which turns the end-to-end branch off):
+
+- YOLOv26s-pose:   ``[1, 56, 8400]`` = xywh, score, 17*(x, y, v)
+- YOLOv26s-detect: ``[1, 84, 8400]`` = xywh, 80 class scores
 """
 
 from __future__ import annotations
@@ -248,31 +255,77 @@ def letterbox(frame_bgr: np.ndarray, imgsz: int):
     return np.ascontiguousarray(nchw), LetterboxInfo(ratio, pad_x, pad_y)
 
 
-def decode_pose(outputs, info: LetterboxInfo, orig_shape, conf: float):
-    """Decode a YOLOv26s-pose output into original-pixel space.
+def _xywh_to_xyxy(boxes: np.ndarray) -> np.ndarray:
+    """Center-format boxes ``[cx, cy, w, h]`` to corner format ``[x1, y1, x2, y2]``."""
+    out = np.empty_like(boxes)
+    out[:, 0] = boxes[:, 0] - boxes[:, 2] / 2
+    out[:, 1] = boxes[:, 1] - boxes[:, 3] / 2
+    out[:, 2] = boxes[:, 0] + boxes[:, 2] / 2
+    out[:, 3] = boxes[:, 1] + boxes[:, 3] / 2
+    return out
 
-    Returns ``boxes [N,4] xyxy``, ``scores [N]``, ``kpts [N,17,3] (x,y,vis)``.
-    """
-    preds = outputs[0][0]  # [300, 57]
-    boxes = preds[:, :4].copy()
-    scores = preds[:, 4]
-    kpts = preds[:, 6:].reshape(-1, 17, 3).copy()
 
-    mask = scores > conf
-    boxes, scores, kpts = boxes[mask], scores[mask], kpts[mask]
+def _nms_keep(boxes: np.ndarray, scores: np.ndarray, iou: float = 0.45) -> np.ndarray:
+    """Indices kept by greedy NMS. Empty when nothing is above the boxes array."""
     if len(boxes) == 0:
-        return boxes, scores, kpts
+        return np.empty(0, dtype=int)
+    picked = cv2.dnn.NMSBoxes(boxes.tolist(), scores.astype(float).tolist(), 0.0, iou)
+    if picked is None or len(picked) == 0:
+        return np.empty(0, dtype=int)
+    return np.asarray(picked, dtype=int).reshape(-1)
 
+
+def _unmap_boxes(boxes: np.ndarray, info: LetterboxInfo, orig_shape) -> np.ndarray:
+    """Letterbox-pixel xyxy boxes back to the original frame, clipped."""
+    boxes = boxes.copy()
     boxes[:, [0, 2]] -= info.pad_x
     boxes[:, [1, 3]] -= info.pad_y
     boxes /= info.ratio
-    kpts[..., 0] -= info.pad_x
-    kpts[..., 1] -= info.pad_y
-    kpts[..., :2] /= info.ratio
-
     h, w = orig_shape[:2]
     boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, w)
     boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, h)
+    return boxes
+
+
+def decode_pose(outputs, info: LetterboxInfo, orig_shape, conf: float):
+    """Decode a YOLOv26s-pose output into original-pixel space.
+
+    Accepts the end-to-end head ``[1, 300, 57]`` and the raw head
+    ``[1, 56, 8400]``. Returns ``boxes [N,4] xyxy``, ``scores [N]``,
+    ``kpts [N,17,3] (x, y, vis)``.
+    """
+    preds = np.asarray(outputs[0])
+    if preds.ndim == 3:
+        preds = preds[0]
+    raw_head = preds.shape[-1] != 57
+    if preds.shape[0] in (56, 57) and preds.shape[-1] not in (56, 57):
+        preds = preds.T
+    if preds.shape[-1] == 57:
+        boxes = preds[:, :4].copy()
+        scores = preds[:, 4].copy()
+        kpts = preds[:, 6:].reshape(-1, 17, 3).copy()
+    elif preds.shape[-1] == 56:
+        boxes = _xywh_to_xyxy(preds[:, :4])
+        scores = preds[:, 4].copy()
+        kpts = preds[:, 5:].reshape(-1, 17, 3).copy()
+    else:
+        raise ValueError(
+            f"pose output shape {tuple(np.asarray(outputs[0]).shape)} is neither "
+            "[1, 300, 57] nor [1, 56, 8400]"
+        )
+
+    mask = scores > conf
+    boxes, scores, kpts = boxes[mask], scores[mask], kpts[mask]
+    if raw_head and len(boxes):
+        keep = _nms_keep(boxes, scores)
+        boxes, scores, kpts = boxes[keep], scores[keep], kpts[keep]
+    if len(boxes) == 0:
+        return boxes, scores, kpts
+
+    boxes = _unmap_boxes(boxes, info, orig_shape)
+    kpts[..., 0] -= info.pad_x
+    kpts[..., 1] -= info.pad_y
+    kpts[..., :2] /= info.ratio
     return boxes, scores, kpts
 
 
@@ -297,16 +350,40 @@ class Detection:
 
 
 def decode_detections(outputs, info: LetterboxInfo, orig_shape, conf: float):
-    """Decode a YOLOv26s-detect output into a list of :class:`Detection`."""
-    preds = outputs[0][0]  # [300, 6]
+    """Decode a YOLOv26s-detect output into a list of :class:`Detection`.
+
+    Accepts the end-to-end head ``[1, 300, 6]`` and the raw head
+    ``[1, 84, 8400]``.
+    """
+    preds = np.asarray(outputs[0])
+    if preds.ndim == 3:
+        preds = preds[0]
+    raw_head = preds.shape[-1] != 6
+    if preds.shape[0] in (6, 84) and preds.shape[-1] not in (6, 84):
+        preds = preds.T
+    if preds.shape[-1] == 6:
+        boxes = preds[:, :4].astype(np.float32)
+        scores = preds[:, 4].astype(np.float32)
+        classes = preds[:, 5].astype(np.int32)
+    elif preds.shape[-1] == 84:
+        boxes = _xywh_to_xyxy(preds[:, :4].astype(np.float32))
+        cls_scores = preds[:, 4:]
+        classes = cls_scores.argmax(axis=1).astype(np.int32)
+        scores = cls_scores.max(axis=1).astype(np.float32)
+    else:
+        raise ValueError(
+            f"detect output shape {tuple(np.asarray(outputs[0]).shape)} is neither "
+            "[1, 300, 6] nor [1, 84, 8400]"
+        )
+
+    mask = scores > conf
+    boxes, scores, classes = boxes[mask], scores[mask], classes[mask]
+    if raw_head and len(boxes):
+        keep = _nms_keep(boxes, scores)
+        boxes, scores, classes = boxes[keep], scores[keep], classes[keep]
+    boxes = _unmap_boxes(boxes, info, orig_shape) if len(boxes) else boxes
     out = []
-    h, w = orig_shape[:2]
-    for x1, y1, x2, y2, score, cls in preds:
-        if score <= conf:
-            continue
-        box = np.array([x1, y1, x2, y2], dtype=np.float32)
-        box[[0, 2]] = np.clip((box[[0, 2]] - info.pad_x) / info.ratio, 0, w)
-        box[[1, 3]] = np.clip((box[[1, 3]] - info.pad_y) / info.ratio, 0, h)
+    for box, score, cls in zip(boxes, scores, classes):
         idx = int(cls)
         name = COCO_NAMES[idx] if 0 <= idx < len(COCO_NAMES) else f"cls{idx}"
         out.append(Detection(name=name, score=float(score), box=box))

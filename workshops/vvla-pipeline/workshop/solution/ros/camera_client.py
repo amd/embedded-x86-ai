@@ -17,7 +17,7 @@ so frames arrive while the caller does other work, and a latest-frame cache.
 
 Notebook: ``notebooks/02_ros2/01_cameras.ipynb``
 Run it for real (with a camera node publishing in another terminal):
-    python -m ros.camera_client --role mount
+    python -m ros.camera_client --role operator
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ class DirectCamera:
         import cv2
 
         self.role = role
+        self._fps = float(fps)
         self._cap = cv2.VideoCapture(device)
         if self._cap.isOpened():
             self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
@@ -51,6 +52,19 @@ class DirectCamera:
             return False, None
         ok, frame = self._cap.read()
         return (ok, frame if ok else None)
+
+    def read_after(self, settled_at):
+        """Discard buffered frames until a read blocks for a new exposure."""
+        period = 1.0 / max(self._fps, 1.0)
+        ok, frame = False, None
+        for _ in range(8):
+            started = time.perf_counter()
+            ok, frame = self.read()
+            if not ok or frame is None:
+                return False, None
+            if time.perf_counter() - started >= 0.5 * period:
+                return True, frame
+        return bool(ok), frame
 
     def close(self):
         """Release the OpenCV capture."""
@@ -121,6 +135,16 @@ class Ros2Camera:
                 return False, None
             return True, self._frame
 
+    def read_after(self, settled_at):
+        """Newest cached frame whose stamp is later than ``settled_at``."""
+        deadline = time.time() + max(self._stale_after, 0.5)
+        while time.time() < deadline:
+            with self._lock:
+                if self._frame is not None and self._stamp > settled_at:
+                    return True, self._frame
+            time.sleep(0.02)
+        return False, None
+
     def close(self) -> None:
         """Stop the executor and destroy the client node."""
         if self._executor is not None:
@@ -153,7 +177,7 @@ def main() -> None:
         level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
     )
     parser = argparse.ArgumentParser(description="Camera client - live preview")
-    parser.add_argument("--role", choices=["mount", "arm"], default="mount")
+    parser.add_argument("--role", choices=["operator", "arm"], default="operator")
     parser.add_argument("--config", default=None)
     args = parser.parse_args()
 

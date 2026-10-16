@@ -14,6 +14,7 @@ topic) come from ``config/pipeline.yaml`` via each node's ``--config``.
 
     ros2 launch launch/strix_vla.launch.py
     ros2 launch launch/strix_vla.launch.py dry_run:=true     # no motors
+    ros2 launch launch/strix_vla.launch.py digital_twin:=true  # MuJoCo twin, no arm
     ros2 launch launch/strix_vla.launch.py config:=/path/to/pipeline.yaml
 
 The orchestrator (``python -m vla_pipeline.main``) is intentionally NOT part
@@ -27,7 +28,7 @@ from pathlib import Path
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.conditions import IfCondition, UnlessCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable  # the venv's python (launch must run inside .venv)
@@ -37,6 +38,11 @@ def generate_launch_description() -> LaunchDescription:
     """Build the LaunchDescription for the two camera nodes and the SO-101 server node."""
     config = LaunchConfiguration("config")
     dry_run = LaunchConfiguration("dry_run")
+    sim = LaunchConfiguration("digital_twin")
+    real_arm = PythonExpression(
+        ["'", dry_run, "' != 'true' and '", sim, "' != 'true'"]
+    )
+    dry_arm = PythonExpression(["'", dry_run, "' == 'true' and '", sim, "' != 'true'"])
 
     return LaunchDescription(
         [
@@ -50,20 +56,25 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="false",
                 description="run the arm server without motors",
             ),
-            # Mount camera (faces the human) - /cameras/mount/image_raw
+            DeclareLaunchArgument(
+                "digital_twin",
+                default_value="false",
+                description="MuJoCo digital twin replaces the arm server + arm camera",
+            ),
+            # Operator camera (faces the human) - /cameras/operator/image_raw
             ExecuteProcess(
                 cmd=[
                     PY,
                     "-m",
                     "vla_pipeline.vision.camera_node",
                     "--role",
-                    "mount",
+                    "operator",
                     "--config",
                     config,
                 ],
                 cwd=str(REPO_ROOT),
                 output="screen",
-                name="camera_mount",
+                name="camera_operator",
             ),
             # Arm camera (end effector) - /cameras/arm/image_raw
             ExecuteProcess(
@@ -79,6 +90,26 @@ def generate_launch_description() -> LaunchDescription:
                 cwd=str(REPO_ROOT),
                 output="screen",
                 name="camera_arm",
+                condition=UnlessCondition(sim),
+            ),
+            # Digital twin: arm server + arm camera rendered on the gripper (one
+            # process - they share the physics) + /sim/view/image_raw
+            ExecuteProcess(
+                cmd=[
+                    PY,
+                    "-m",
+                    "so101_sim.node",
+                    "--config",
+                    config,
+                    "--stack",
+                    "pipeline",
+                    "--sim-cameras",
+                    "arm",
+                ],
+                cwd=str(REPO_ROOT),
+                output="screen",
+                name="so101_sim",
+                condition=IfCondition(sim),
             ),
             # SO-101 bus owner - /so101/joint_command, /so101/joint_state
             ExecuteProcess(
@@ -93,7 +124,7 @@ def generate_launch_description() -> LaunchDescription:
                 cwd=str(REPO_ROOT),
                 output="screen",
                 name="so101_server",
-                condition=UnlessCondition(dry_run),
+                condition=IfCondition(real_arm),
             ),
             ExecuteProcess(
                 cmd=[
@@ -108,7 +139,7 @@ def generate_launch_description() -> LaunchDescription:
                 cwd=str(REPO_ROOT),
                 output="screen",
                 name="so101_server_dry",
-                condition=IfCondition(dry_run),
+                condition=IfCondition(dry_arm),
             ),
         ]
     )

@@ -14,7 +14,7 @@ attributing every joint to the TODO whose output drives it - while the real
 arm tracks along.
 
 FAIL-FAST POLICY (no silent fallbacks): on the real rig every stage must run
-on its intended hardware - the mount camera, the ROS 2 arm, and the AI
+on its intended hardware - the operator camera, the ROS 2 arm, and the AI
 accelerators. If a stage can't come up on its real backend, the app exits with
 a diagnostic instead of quietly substituting a synthetic/dry-run/keyword
 stand-in, so you can see and fix what's actually wrong. The ONE fallback that
@@ -29,8 +29,9 @@ never as an automatic fallback:
     python app.py --synthetic            # explicitly skip the camera/hands
     python app.py --dry-run --synthetic --no-llm     # laptop mode, everything faked
     python app.py --dry-run --synthetic --headless --frames 60   # CI-style check
+    python app.py --digital-twin         # no robot hardware: MuJoCo twin of the arm
 
-The app also brings up the ROS 2 server nodes it needs (the arm + mount-camera
+The app also brings up the ROS 2 server nodes it needs (the arm + operator-camera
 publishers) as child processes and tears them down on exit - so you don't need
 a terminal per node. Pass --no-nodes if you start them yourself.
 
@@ -71,7 +72,7 @@ def _start_nodes(cfg, args):
     """Bring up the ROS 2 server nodes this app needs, as child processes.
 
     'Server nodes own hardware; everything else subscribes' - so instead of a
-    terminal per node, the app starts its own arm + mount-camera servers and
+    terminal per node, the app starts its own arm + operator-camera servers and
     then connects to them as a client. The supervisor is fail-fast and
     idempotent: a node already publishing (you started it, or --no-nodes) is
     left alone. Returns the supervisor (stop it on exit) or None.
@@ -90,17 +91,19 @@ def _start_nodes(cfg, args):
     wanted = []
     if not args.dry_run and (cfg.get("robot") or {}).get("use_ros2", True):
         wanted.append("arm")
-    if not args.synthetic and ((cfg.get("cameras") or {}).get("mount") or {}).get(
+    if not args.synthetic and ((cfg.get("cameras") or {}).get("operator") or {}).get(
         "use_ros2", False
     ):
-        wanted.append("camera_mount")
+        wanted.append("camera_operator")
     if not wanted:
         return None
 
     from ros.node_supervisor import NodeSupervisor
 
     print("-- starting ROS 2 server nodes --")
-    sup = NodeSupervisor(cfg, wanted)
+    sup = NodeSupervisor(
+        cfg, wanted, sim=args.digital_twin and not args.dry_run, config_path=args.config
+    )
     try:
         sup.start()
     except Exception as e:
@@ -146,7 +149,10 @@ def _build_arm(cfg, args):
             from common.motion import make_arm_backend
 
             arm = make_arm_backend(cfg)
-            print("arm: direct serial (sole bus owner!)")
+            if args.digital_twin:
+                print("arm: MuJoCo digital twin (in-process)")
+            else:
+                print("arm: direct serial (sole bus owner!)")
             return arm
         except Exception as e:
             _die(
@@ -166,12 +172,12 @@ def _build_camera(cfg, args):
     try:
         from ros.camera_client import make_camera
 
-        cam = make_camera(cfg, "mount")
+        cam = make_camera(cfg, "operator")
     except Exception as e:
         _die(
             "camera",
-            f"Could not construct the mount camera client ({e}).",
-            "Check cameras.mount in config; pass --synthetic to skip the camera.",
+            f"Could not construct the operator camera client ({e}).",
+            "Check cameras.operator in config; pass --synthetic to skip the camera.",
         )
     ok, _ = cam.read()
     if not ok:
@@ -180,15 +186,15 @@ def _build_camera(cfg, args):
         time.sleep(0.5)  # give a ROS stream a beat to warm up
         ok, _ = cam.read()
     if ok:
-        print("camera: mount role via config")
+        print("camera: operator role via config")
         return cam
     cam.close()
     _die(
         "camera",
-        "mount camera is not delivering frames.",
+        "operator camera is not delivering frames.",
         "Is the camera node publishing? "
-        "python -m ros.camera_node --role mount   (or check the device index / "
-        "cameras.mount.use_ros2). Pass --synthetic to skip the camera.",
+        "python -m ros.camera_node --role operator   (or check the device index / "
+        "cameras.operator.use_ros2). Pass --synthetic to skip the camera.",
     )
 
 
@@ -282,6 +288,8 @@ def _mode_label(args) -> str:
         flags.append("--no-llm")
     if args.no_nodes:
         flags.append("--no-nodes")
+    if args.digital_twin:
+        flags.append("--digital-twin")
     if args.headless:
         flags.append("--headless")
     if args.frames:
@@ -311,7 +319,7 @@ def _required_todos(cfg, args) -> set:
         need |= {"1.5", "1.6"}  # llama-server brain
     if not args.synthetic:
         need |= {"1.4"}  # MediaPipe hands
-        cams = (cfg.get("cameras") or {}).get("mount") or {}
+        cams = (cfg.get("cameras") or {}).get("operator") or {}
         if cams.get("use_ros2", False):
             need |= {"2.3"}  # camera client (subscriber)
             if not args.no_nodes:
@@ -397,6 +405,11 @@ def main() -> int:
     )
     ap.add_argument("--headless", action="store_true", help="no preview window")
     ap.add_argument(
+        "--digital-twin",
+        action="store_true",
+        help="drive the MuJoCo digital twin (arm + arm camera) instead of the rig",
+    )
+    ap.add_argument(
         "--frames",
         type=int,
         default=0,
@@ -418,6 +431,9 @@ def main() -> int:
     from common.config import PROJECT_ROOT, load_config
 
     cfg = load_config(args.config)
+    if args.digital_twin:
+        cfg.setdefault("robot", {})["backend"] = "sim"
+        cfg.setdefault("cameras", {}).setdefault("arm", {})["source"] = "sim"
 
     # Fail-soft on unfinished work: list the TODOs this run needs instead of
     # crashing on the first stub. Heavy imports come AFTER this, so a fresh

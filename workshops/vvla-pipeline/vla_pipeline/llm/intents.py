@@ -36,6 +36,7 @@ class Intent(str, Enum):
     PICK_PLACE = "pick_place"
     DANCE = "dance"
     GRIP = "grip"
+    RELEASE = "release"
     WAVE = "wave"
     HOME = "home"
     STOP = "stop"
@@ -122,6 +123,9 @@ Commands:
 - "dance": the user wants the robot to dance / groove / party.
 - "grip": the user is handing the robot something to hold ("hold this",
   "take this pencil", "grab what I give you").
+- "release": the user wants the jaws opened, here, so they can take the
+  object or drop it ("release", "open", "drop it", "let go",
+  "open your hand").
 - "wave": the user wants a wave / greeting ("wave at me", "say hi").
 - "home": return to the rest/home position ("go home", "reset position",
   "rest now").

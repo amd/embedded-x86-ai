@@ -16,12 +16,12 @@ here:
    it. Always verify which execution provider a session *actually* got
    (:func:`active_provider`) - a model that quietly landed on CPU still
    works, just 10-30× slower, and you won't know unless you look.
-2. **The NPU context budget.** The XDNA2 partition holds a limited number of
-   concurrent hardware contexts. Both YOLO models fit together; adding a
-   third/fourth model (e.g. Whisper encoder+decoder) can fail with
-   ``HW context creation unsuccessful / sub buffer size and offset``. That is
-   NOT a stale cache - move a model to CPU (``device: cpu`` in the config)
-   and read the startup logs to see what actually fit.
+2. **Load order.** The models on the NPU share buffers within a process,
+   created by its first NPU session and freed when the last one closes. A
+   larger model opened while a smaller one is open fails with ``HW context
+   creation unsuccessful / sub buffer size and offset``. That is NOT a stale
+   cache and NOT a full NPU: open YOLO-pose first and keep it open, so
+   YOLO-detect can load after it (``models.vision.size_npu`` does this).
 
 Compiled NPU artifacts are keyed by ``cache_dir + cache_key`` and are
 portable: the first compile can take tens of minutes (done once, from the
@@ -114,7 +114,7 @@ def report_placement(session: ort.InferenceSession, requested: str,
     on_npu = got == "VitisAIExecutionProvider"
     if requested == "npu" and not on_npu:
         logger.warning("%s requested NPU but is running on %s - check the "
-                       "Ryzen AI wheel install and the NPU context budget.",
+                       "Ryzen AI wheel install and the NPU load order.",
                        name, got)
     else:
         logger.info("%s running on %s", name, got)

@@ -10,9 +10,12 @@
 One tick of mimic is the whole pipeline in miniature:
 
     camera frame ──► YOLO-pose (NPU) ──► wrist x/y + forearm ─┐
-                └──► MediaPipe (CPU) ──► size/roll/pinch ─────┤──► mapper ──► arm
-                                                              │  (provided)  (ROS 2)
-                     shared grip-lock state ──────────────────┘
+                └──► MediaPipe (CPU) ──► size/roll/pinch ─────┴──► mapper ──► arm
+                                                                 (provided)  (ROS 2)
+
+Your pinch always drives the gripper: a grip locked by pick-and-place or
+grip is released when mimic starts, so a held object drops when you open
+your fingers.
 
 On a REAL arm the mimic session runs against LIVE_MIMIC_LIMITS - the base
 envelope extended 25% (gripper excluded) - and restores the base
@@ -71,10 +74,7 @@ def mimic_tick(ctx, frame) -> MimicSignals:
        ``ctx.pose.kpt_threshold``).
     2. ``ctx.hands.process(frame)`` → a HandObservation (or None) carrying
        hand_size / roll_ti / roll_ref / roll_ti_weight / roll / pinch.
-    3. Grip-lock: if ``ctx.shared_state['grip_lock']`` is set, pass
-       ``ctx.shared_state['grip_lock_pos']`` as ``gripper_override`` so a
-       held object stays held while the arm mimics.
-    4. ``ctx.mapper.step(...)`` with everything from 1-3 (pass the elbow as
+    3. ``ctx.mapper.step(...)`` with everything from 1-2 (pass the elbow as
        ``elbow_xy=`` - wrist_flex measures your hand's direction against it
        to read the WRIST BEND; without it the forearm is assumed vertical)
        → a clamped joint dict - then ``ctx.arm.send_joints(joints)``.
@@ -117,6 +117,9 @@ def run_mimic(ctx, cmd=None) -> None:
     # base JOINT_LIMITS.
     live = bool(getattr(ctx.arm, "is_live", False))
     prev_limits = set_active_limits(LIVE_MIMIC_LIMITS) if live else None
+    if ctx.shared_state.pop("grip_lock", None):
+        ctx.shared_state.pop("grip_lock_pos", None)
+        ctx.say("Your pinch drives the gripper now. Open your fingers to let go.")
     logger.info(
         "Mimic running (pose on %s%s) - move your hand; 'q' quits.",
         provider,
@@ -178,16 +181,15 @@ def run_mimic(ctx, cmd=None) -> None:
                             2,
                         )
                         cv2.circle(vis, e, 6, (0, 255, 255), 2)
-                lock = "  [GRIP LOCKED]" if ctx.shared_state.get("grip_lock") else ""
                 live_tag = "  [LIVE +25% RANGE]" if live else ""
                 annotate_lines(
                     vis,
-                    [f"gesture mimic - pose on {provider}{lock}{live_tag}"]
+                    [f"gesture mimic - pose on {provider}{live_tag}"]
                     + HUD_ATTRIBUTION,
                     scale=0.5,
                 )
                 panel = draw_arm_panel(
-                    signals.joints or ctx.arm.get_joints(),
+                    {**ctx.arm.get_joints(), **(signals.joints or {})},
                     width=300,
                     height=vis.shape[0],
                 )

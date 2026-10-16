@@ -38,6 +38,9 @@
 #   ./run_notebooks.sh --classic       # use `jupyter notebook` instead of lab
 #   ./run_notebooks.sh --no-llm        # don't start the llama server
 #   ./run_notebooks.sh --no-monitor    # don't open the resource HUD
+#   ./run_notebooks.sh --test [args]   # steps 1-5, then the automated tests in this
+#                                      # environment instead of Jupyter (args go to
+#                                      # the tests/sim runs, e.g. -k toothbrush)
 #
 # Env overrides:
 #   KERNEL_NAME=vvla-workshop     kernelspec name to register/select
@@ -51,18 +54,25 @@ KERNEL_NAME="${KERNEL_NAME:-vvla-workshop}"
 KERNEL_DISPLAY="${KERNEL_DISPLAY:-Python (VVLA workshop)}"
 JUPYTER_PORT="${JUPYTER_PORT:-8888}"
 
-FORCE_KERNEL=0; NO_LAUNCH=0; LAUNCHER="lab"; WITH_LLM=1; WITH_MONITOR=1
-for arg in "$@"; do
-  case "$arg" in
+FORCE_KERNEL=0; NO_LAUNCH=0; LAUNCHER="lab"; WITH_LLM=1; WITH_MONITOR=1; TEST_MODE=0
+PYTEST_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --force-kernel) FORCE_KERNEL=1 ;;
     --no-launch)    NO_LAUNCH=1 ;;
     --classic)      LAUNCHER="notebook" ;;
     --no-llm)       WITH_LLM=0 ;;
     --no-monitor)   WITH_MONITOR=0 ;;
-    -h|--help)      sed -n '2,/^# =====/p' "$0"; exit 0 ;;
-    *) echo "unknown option: $arg (see --help)" >&2; exit 2 ;;
+    --test)         TEST_MODE=1; NO_LAUNCH=1; WITH_MONITOR=0; shift; PYTEST_ARGS=("$@"); break ;;
+    -h|--help)      sed -n '/^# run_notebooks.sh/,/^# =====/p' "$0"; exit 0 ;;
+    *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
+  shift
 done
+if [[ "$TEST_MODE" -eq 1 && "$WITH_LLM" -eq 0 ]]; then
+  echo "--test needs the llama server: the Llama notebooks run against it (drop --no-llm)" >&2
+  exit 2
+fi
 
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m warn:\033[0m %s\n' "$*" >&2; }
@@ -133,6 +143,8 @@ CORE=(
   "matplotlib:matplotlib>=3.7"
   "ipywidgets:ipywidgets>=8.1"
   "jupyter_ui_poll:jupyter-ui-poll>=0.2"
+  "mujoco:mujoco>=3.1.3"
+  "OpenGL:PyOpenGL>=3.1"
 )
 for entry in "${CORE[@]}"; do
   mod="${entry%%:*}"; spec="${entry#*:}"
@@ -142,6 +154,15 @@ for entry in "${CORE[@]}"; do
     pip_install "$spec"
   fi
 done
+
+# The SO-101 digital twin (03_integration/02_digital_twin.ipynb). --no-deps:
+# its deps are installed above, and pip must not touch the pinned numpy.
+if "$PY" -c 'import so101_sim' 2>/dev/null; then
+  printf '    have %-13s\n' "so101_sim"
+else
+  pip_install --no-deps -e "${REPO_ROOT}/so101_sim"
+fi
+"$PY" -m so101_sim.assets || warn "could not fetch the SO-101 meshes - the digital twin will not load"
 
 # ipykernel is handled separately (NOT in the presence-only loop above): it must
 # stay on the 6.x line. ipykernel 7.x removed Kernel.do_one_iteration(), which
@@ -263,12 +284,45 @@ if [[ "$WITH_LLM" -eq 1 ]]; then
     say "  llama-server PID ${LLAMA_PID} (auto-stops when you quit Jupyter;"
     say "  first load takes 10-30 s while the model streams into iGPU memory)"
   else
+    [[ "$TEST_MODE" -eq 1 ]] && die "llama-server binary or GGUF model not found (${LLAMA_BIN}, ${LLAMA_GGUF}) - run ./bootstrap.sh"
     warn "llama-server binary or GGUF model not found - skipping."
     warn "  expected binary: ${LLAMA_BIN}"
     warn "  expected model:  ${LLAMA_GGUF}"
     warn "  (run the repo bootstrap to build/download them; the 03_igpu_llama"
     warn "   notebook shows the exact command to start the server yourself)"
   fi
+fi
+
+# --test: the notebooks and the tests run in exactly this environment.
+if [[ "$TEST_MODE" -eq 1 ]]; then
+  say "Waiting for llama-server at http://${LLAMA_HOST}:${LLAMA_PORT}"
+  for _ in $(seq 1 90); do
+    llama_alive && break
+    if [[ -n "$LLAMA_PID" ]] && ! kill -0 "$LLAMA_PID" 2>/dev/null; then
+      die "llama-server exited - see ${WORKSHOP_DIR}/logs/llama-server.log"
+    fi
+    sleep 1
+  done
+  llama_alive || die "llama-server did not answer within 90 s - see ${WORKSHOP_DIR}/logs/llama-server.log"
+  for entry in "pytest:pytest" "pytest_timeout:pytest-timeout" "nbclient:nbclient"; do
+    "$PY" -c "import ${entry%%:*}" 2>/dev/null || pip_install "${entry#*:}"
+  done
+  cd "$REPO_ROOT"
+  export VVLA_TEST_STRICT=1
+  RC=0
+  run_pytest() {
+    local rc=0
+    "$PY" -m pytest "$@" || rc=$?
+    # 5: the -k/-m given to --test left nothing to run in this part
+    if [[ $rc -ne 0 && $rc -ne 5 ]]; then RC=1; fi
+  }
+  say "pytest tests/npu (YOLO load order on the NPU)"
+  run_pytest tests/npu
+  say "pytest tests/sim -m 'sim and not docs' (the stacks on the twin, YOLO on the NPU)"
+  run_pytest tests/sim -m "sim and not docs" "${PYTEST_ARGS[@]}"
+  say "pytest tests/sim -m docs (every notebook in README order, the Instructor's corner)"
+  run_pytest tests/sim -m docs "${PYTEST_ARGS[@]}"
+  exit "$RC"
 fi
 
 # --- 6. Pop the always-on-top resource HUD (CPU/GPU/NPU), torn down on exit --

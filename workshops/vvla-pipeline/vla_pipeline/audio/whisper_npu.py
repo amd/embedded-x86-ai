@@ -38,6 +38,7 @@ import onnxruntime as ort
 from transformers import WhisperFeatureExtractor, WhisperTokenizer
 
 from vla_pipeline.utils.config import load_config, resolve
+from vla_pipeline.utils.npu_session import size_npu
 
 logger = logging.getLogger(__name__)
 
@@ -106,9 +107,17 @@ class WhisperONNX:
 
         # Tokenizer/feature-extractor MUST match the model checkpoint variant.
         # AMD's base NPU model is English-only -> openai/whisper-base.en.
+        # Prefer the local cache: an expired Hugging Face token returns 401
+        # even when these public files are already downloaded.
         tok_id = tokenizer_id or f"openai/{model_type}"
-        self.feature_extractor = WhisperFeatureExtractor.from_pretrained(tok_id)
-        self.tokenizer = WhisperTokenizer.from_pretrained(tok_id)
+        try:
+            self.feature_extractor = WhisperFeatureExtractor.from_pretrained(
+                tok_id, local_files_only=True
+            )
+            self.tokenizer = WhisperTokenizer.from_pretrained(tok_id, local_files_only=True)
+        except OSError:
+            self.feature_extractor = WhisperFeatureExtractor.from_pretrained(tok_id)
+            self.tokenizer = WhisperTokenizer.from_pretrained(tok_id)
         self.decoder_start_token = self.sot_token = (
             self.tokenizer.convert_tokens_to_ids("<|startoftranscript|>")
         )
@@ -265,6 +274,37 @@ def download_whisper_onnx(
     return encoder_path, decoder_path
 
 
+def download_whisper_tokenizer(
+    model_type: str, tokenizer_id: str | None = None
+) -> str:
+    """Cache the Whisper tokenizer and feature extractor used at runtime.
+
+    The ONNX encoder/decoder do not include them. ``WhisperONNX`` and
+    ``workshop.common.speech.Whisper`` load this repo with
+    ``local_files_only`` first, so bootstrap must place it in the Hugging
+    Face cache before an offline run.
+    """
+    from transformers import WhisperFeatureExtractor, WhisperTokenizer
+
+    entry = HF_MODEL_MAP.get(model_type)
+    if tokenizer_id:
+        tok_id = tokenizer_id
+    elif isinstance(entry, dict) and entry.get("tokenizer"):
+        tok_id = entry["tokenizer"]
+    else:
+        tok_id = f"openai/{model_type}"
+
+    def _load(cls):
+        try:
+            return cls.from_pretrained(tok_id, local_files_only=True)
+        except OSError:
+            return cls.from_pretrained(tok_id)
+
+    _load(WhisperFeatureExtractor)
+    _load(WhisperTokenizer)
+    return tok_id
+
+
 def build_provider_opts(opts: dict) -> list:
     """AMD demo provider-option builder: VitisAI EP if a config_file is set."""
     if opts.get("config_file"):
@@ -385,6 +425,7 @@ class WhisperNPU:
             )
 
         if self.device == "npu":
+            size_npu(cfg, device)
             cache_dir = str(resolve(w.get("cache_dir", "cache")))
             enc_opts = {
                 "config_file": str(

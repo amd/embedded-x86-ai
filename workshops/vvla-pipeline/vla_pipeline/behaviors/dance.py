@@ -25,54 +25,14 @@ import logging
 import random
 import time
 
-from vla_pipeline.robot.arm_interface import ArmClient, DryRunArm, make_arm
+from vla_pipeline.robot.arm_interface import ArmClient, DryRunArm, ensure_common_path, make_arm
 from vla_pipeline.utils.config import load_config
 
-logger = logging.getLogger(__name__)
+ensure_common_path()
 
-# Each move is a list of joint keyframes (degrees); one keyframe per beat.
-MOVES: dict[str, list[dict[str, float]]] = {
-    "sway": [
-        {
-            "shoulder_pan": -45.0,
-            "shoulder_lift": -60.0,
-            "elbow_flex": 60.0,
-            "wrist_roll": -40.0,
-        },
-        {
-            "shoulder_pan": 45.0,
-            "shoulder_lift": -60.0,
-            "elbow_flex": 60.0,
-            "wrist_roll": 40.0,
-        },
-    ],
-    "pump": [
-        {"shoulder_lift": -90.0, "elbow_flex": 95.0, "wrist_flex": 60.0},
-        {"shoulder_lift": -20.0, "elbow_flex": 20.0, "wrist_flex": -20.0},
-    ],
-    "disco_point": [
-        {
-            "shoulder_pan": -60.0,
-            "shoulder_lift": -30.0,
-            "elbow_flex": 10.0,
-            "wrist_flex": 0.0,
-        },
-        {
-            "shoulder_pan": 60.0,
-            "shoulder_lift": -85.0,
-            "elbow_flex": 80.0,
-            "wrist_flex": 50.0,
-        },
-    ],
-    "wrist_spin": [
-        {"shoulder_lift": -55.0, "elbow_flex": 70.0, "wrist_roll": -90.0},
-        {"shoulder_lift": -55.0, "elbow_flex": 70.0, "wrist_roll": 90.0},
-    ],
-    "gripper_chomp": [
-        {"gripper": 80.0, "wrist_flex": 30.0},
-        {"gripper": 5.0, "wrist_flex": 50.0},
-    ],
-}
+from common.motion import DANCE_MOVES as MOVES  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 
 def run_dance(

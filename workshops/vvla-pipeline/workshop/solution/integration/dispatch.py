@@ -43,6 +43,8 @@ class WorkshopContext:
     pose: object = None  # PoseEstimator (or scripted stand-in)
     hands: object = None  # HandTracker (or scripted stand-in)
     camera: object = None  # camera client (ROS 2 / direct / synthetic)
+    detector: object = None  # ObjectDetector, for pick_place
+    arm_camera: object = None  # the wrist camera, for grip and pick_place
     mapper: object = None  # MimicMapper
     registry: CommandRegistry = None
     shared_state: dict = field(default_factory=dict)
@@ -68,7 +70,11 @@ def build_registry() -> CommandRegistry:
     GESTURE_MIMIC → ``run_mimic``, DANCE → ``run_dance``, WAVE →
     ``run_wave``, HOME → ``run_home``. (STOP is deliberately NOT a handler -
     it's an interrupt, handled before dispatch ever happens.)
+
+    The provided manipulation behaviors (grip, pick_place, fetch_block, in
+    ``common.manipulation``) are added after yours.
     """
+    from common.manipulation import register_manipulation
     from integration.behaviors import run_dance, run_home, run_wave
     from integration.mimic import run_mimic
 
@@ -79,6 +85,7 @@ def build_registry() -> CommandRegistry:
     registry.add(Intent.WAVE, run_wave)
     registry.add(Intent.HOME, run_home)
     # <<< TODO 3.1
+    register_manipulation(registry)
     return registry
 
 

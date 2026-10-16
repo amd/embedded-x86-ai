@@ -48,7 +48,7 @@ from common.motion import (
     make_arm_backend,
     set_active_limits,
 )
-from common.ros_helpers import joint_state_msg
+from common.ros_helpers import GRIPPER_TORQUE_TOPIC, joint_state_msg
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,7 @@ try:
     from rclpy.node import Node
     from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
     from sensor_msgs.msg import JointState
+    from std_msgs.msg import Int32
 
     ROS2_AVAILABLE = True
 except ImportError:  # pragma: no cover
@@ -99,7 +100,9 @@ class So101ServerNode(Node):
         self._gripper_load = math.nan  # nan = feedback unavailable
         self._tick_count = 0
         self._state_pub = None
+        self._torque_limit = None  # next gripper Torque_Limit to write
         self._setup_ros()
+        self.create_subscription(Int32, GRIPPER_TORQUE_TOPIC, self._on_torque_limit, 10)
 
         self._running = True
         self._thread = threading.Thread(target=self._control_loop, daemon=True)
@@ -136,6 +139,11 @@ class So101ServerNode(Node):
         )
         # <<< TODO 2.5
 
+    def _on_torque_limit(self, msg) -> None:
+        """PROVIDED: queue a gripper Torque_Limit for the control loop."""
+        with self._lock:
+            self._torque_limit = int(msg.data)
+
     def _publish_state(self, joints: dict) -> None:
         """Publish the arm's state, with gripper effort riding in ``effort``.
 
@@ -158,7 +166,10 @@ class So101ServerNode(Node):
             with self._lock:
                 target = dict(self._target)
                 fresh = (time.time() - self._last_cmd_time) < 1.0
+                torque_limit, self._torque_limit = self._torque_limit, None
             try:
+                if torque_limit is not None:
+                    self._arm.set_gripper_torque_limit(torque_limit)
                 # Hold the last pose silently when commands stop. In
                 # direct-goal mode, write only when the goal changes so the
                 # servo's onboard profile runs once, uninterrupted.

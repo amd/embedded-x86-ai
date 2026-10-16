@@ -186,6 +186,11 @@ COCO_NAMES = [
 # Spoken-word → COCO class synonyms (static asset; extend for your own objects).
 SYNONYMS = {
     "ball": "sports ball",
+    "sports_ball": "sports ball",
+    "soccer": "sports ball",
+    "soccer ball": "sports ball",
+    "football": "sports ball",
+    "foot ball": "sports ball",
     "cube": None,
     "block": None,
     "phone": "cell phone",
@@ -194,6 +199,7 @@ SYNONYMS = {
     "mug": "cup",
     "pen": None,
     "pencil": None,
+    "brush": "toothbrush",
     "drink": "bottle",
     "water bottle": "bottle",
     "computer": "laptop",

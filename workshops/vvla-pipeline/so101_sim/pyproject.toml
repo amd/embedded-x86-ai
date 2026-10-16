@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "so101-sim"
+version = "0.1.0"
+description = "MuJoCo digital twin of the SO-101 arm for the VVLA pipeline and workshop"
+requires-python = ">=3.10"
+license = { text = "BSD-3-Clause AND Apache-2.0" }
+dependencies = [
+    "mujoco>=3.1.3",
+    "numpy",
+    "PyOpenGL",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-timeout", "nbclient"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+so101_sim = [
+    "models/*.xml",
+    "models/*.md",
+    "models/LICENSE",
+    "models/assets/*.stl",
+    "models/props/*.obj",
+    "models/props/*.png",
+    "models/props/*.md",
+]

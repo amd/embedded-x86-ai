@@ -1,0 +1,105 @@
+<mujoco model="so101 vvla digital twin">
+  <include file="so101.xml"/>
+
+  <statistic center="0.18 0 0.08" extent="0.55"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.35 0.35 0.35" specular="0.1 0.1 0.1"/>
+    <rgba haze="0.12 0.16 0.22 1"/>
+    <!-- offscreen buffer is resized at runtime to fit every tiled view -->
+    <global azimuth="150" elevation="-24" offwidth="1920" offheight="1440"/>
+    <quality shadowsize="2048"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.16 0.22 0.32" rgb2="0.02 0.03 0.05"
+      width="512" height="3072"/>
+    <texture type="2d" name="floor_tex" builtin="checker" mark="edge"
+      rgb1="0.18 0.22 0.28" rgb2="0.1 0.13 0.17" markrgb="0.6 0.6 0.6" width="300" height="300"/>
+    <texture type="2d" name="table_tex" builtin="flat" rgb1="0.55 0.45 0.33" rgb2="0.5 0.4 0.3"
+      mark="random" random="0.02" markrgb="0.45 0.36 0.26" width="512" height="512"/>
+    <texture type="2d" name="sports_ball_tex" file="props/sports_ball.png"/>
+    <texture type="2d" name="book_tex" file="props/book.png"/>
+    <texture type="2d" name="bottle_tex" file="props/bottle.png"/>
+    <material name="floor_mat" texture="floor_tex" texuniform="true" texrepeat="4 4" reflectance="0.1"/>
+    <material name="table_mat" texture="table_tex" texuniform="true" texrepeat="3 3" specular="0.2"/>
+    <material name="sports_ball_mat" texture="sports_ball_tex" specular="0.25" shininess="0.35"/>
+    <material name="book_mat" texture="book_tex" specular="0.15" shininess="0.2"/>
+    <material name="bottle_mat" texture="bottle_tex" specular="0.35" shininess="0.45"/>
+    <material name="toothbrush_mat" rgba="0.08 0.55 0.85 1" specular="0.35" shininess="0.5"/>
+    <material name="stand_mat" rgba="0.35 0.37 0.42 1" specular="0.2"/>
+    <mesh name="sports_ball_mesh" file="../props/sports_ball.obj"/>
+    <mesh name="book_mesh" file="../props/book.obj"/>
+    <mesh name="bottle_mesh" file="../props/bottle.obj"/>
+    <mesh name="toothbrush_mesh" file="../props/toothbrush.obj"/>
+  </asset>
+
+  <worldbody>
+    <light name="key" pos="0.3 -0.3 1.2" dir="-0.25 0.25 -1" directional="true" castshadow="true"/>
+    <light name="fill" pos="-0.4 0.4 0.9" dir="0.4 -0.4 -1" directional="true" castshadow="false"
+      diffuse="0.25 0.25 0.25"/>
+
+    <geom name="floor" pos="0 0 -0.75" size="0 0 0.05" type="plane" material="floor_mat"/>
+
+    <!-- tabletop: top surface at z=-0.005 (the arm base sits on a 5 mm mounting plate,
+         so the folded rest pose clears the table like on the rig) -->
+    <body name="table" pos="0.2 0 -0.025">
+      <geom name="table_top" type="box" size="0.4 0.45 0.02" material="table_mat"/>
+      <geom name="table_leg" type="box" size="0.03 0.03 0.35" pos="0.3 0 -0.37"
+        material="stand_mat" contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- user-facing operator camera: where the human stands, looking back at the arm -->
+    <body name="operator_look" pos="0.15 0 0.12"/>
+    <camera name="operator_cam" mode="targetbody" target="operator_look" pos="0.85 0 0.42"
+      resolution="640 480" sensorsize="0.0048 0.0036" focal="0.0036 0.0036"/>
+
+    <!-- default 3-D overview camera -->
+    <body name="scene_look" pos="0.17 0 0.08"/>
+    <camera name="scene_cam" mode="targetbody" target="scene_look" pos="0.62 -0.48 0.42"/>
+
+    <!-- mocap pedestals: tests/behaviors raise them to put an object exactly where a
+         configured pose closes its jaws; parked inside the tabletop they are hidden -->
+    <body name="stand_a" mocap="true" pos="0.3 0.3 -0.16">
+      <geom name="stand_a_g" type="box" size="0.01 0.01 0.15" material="stand_mat"/>
+    </body>
+    <body name="stand_b" mocap="true" pos="0.3 -0.3 -0.16">
+      <geom name="stand_b_g" type="box" size="0.01 0.01 0.15" material="stand_mat"/>
+    </body>
+
+    <!-- graspable free bodies -->
+    <body name="book" pos="0.22 -0.15 0.001" euler="0 0 -0.25">
+      <freejoint name="book_j"/>
+      <geom name="book_collision" type="box" size="0.03 0.045 0.006" rgba="0 0 0 0"
+        mass="0.045" friction="1.2 0.02 0.001"/>
+      <geom name="book_visual" type="mesh" mesh="book_mesh" material="book_mat"
+        euler="0 0 1.5708" contype="0" conaffinity="0" group="2" mass="0"/>
+    </body>
+    <body name="sports_ball" pos="0.28 0.06 0.015">
+      <freejoint name="sports_ball_j"/>
+      <geom name="sports_ball_collision" type="sphere" size="0.02" rgba="0 0 0 0" condim="6"
+        mass="0.025" friction="1.2 0.02 0.01" solref="0.01 1"/>
+      <geom name="sports_ball_visual" type="mesh" mesh="sports_ball_mesh" material="sports_ball_mat"
+        contype="0" conaffinity="0" group="2" mass="0"/>
+    </body>
+    <body name="bottle" pos="0.2 0.2 0.0375">
+      <freejoint name="bottle_j"/>
+      <geom name="bottle_collision" type="cylinder" size="0.02 0.0425" rgba="0 0 0 0"
+        mass="0.06" friction="1.0 0.02 0.001"/>
+      <geom name="bottle_visual" type="mesh" mesh="bottle_mesh" material="bottle_mat"
+        contype="0" conaffinity="0" group="2" mass="0"/>
+    </body>
+    <body name="toothbrush" pos="0.12 -0.24 0.005" euler="0 0 0.4">
+      <freejoint name="toothbrush_j"/>
+      <geom name="toothbrush_collision" type="box" size="0.012 0.06 0.01" rgba="0 0 0 0"
+        mass="0.008" condim="6" friction="2.0 0.03 0.003" solref="0.01 1"/>
+      <geom name="toothbrush_visual" type="mesh" mesh="toothbrush_mesh" material="toothbrush_mat"
+        euler="0 0 1.5708" contype="0" conaffinity="0" group="2" mass="0"/>
+    </body>
+  </worldbody>
+
+  <contact>
+    <!-- the coarse link boxes overlap in the folded rest pose; the real links clear -->
+    <exclude body1="shoulder" body2="lower_arm"/>
+  </contact>
+</mujoco>

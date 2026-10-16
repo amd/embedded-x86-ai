@@ -29,7 +29,7 @@ import threading
 import time
 
 from common.motion import GRIPPER_CLOSED_FLOOR, ArmClient, clamp_joints
-from common.ros_helpers import joint_state_msg, parse_joint_state
+from common.ros_helpers import GRIPPER_TORQUE_TOPIC, joint_state_msg, parse_joint_state
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,7 @@ class Ros2ArmClient(ArmClient):
         self._effort = None
         self._node = None
         self._pub = None
+        self._torque_pub = None
         self._executor = None
         self._setup_ros(r)
 
@@ -143,6 +144,16 @@ class Ros2ArmClient(ArmClient):
         """PROVIDED: latest gripper effort, or None (NaN on the wire)."""
         with self._state_lock:
             return self._effort
+
+    def set_gripper_torque_limit(self, value: int) -> None:
+        """PROVIDED: publish the gripper Torque_Limit (0-1000); the server
+        node writes it on its next control tick."""
+        from std_msgs.msg import Int32
+
+        if self._torque_pub is None:
+            self._torque_pub = self._node.create_publisher(Int32, GRIPPER_TORQUE_TOPIC, 10)
+        self.gripper_torque_limit = int(min(max(int(value), 0), 1000))
+        self._torque_pub.publish(Int32(data=self.gripper_torque_limit))
 
     def close(self) -> None:
         """Stop the executor and destroy the client node."""

@@ -211,6 +211,7 @@ class ScriptedHands:
 
 _KEYWORD_ROUTES = [
     (r"\b(stop|halt|freeze|abort)\b", "stop", None),
+    (r"\b(release|open|drop)\b|\blet go\b", "release", None),
     (r"\b(copy|mirror|follow|mimic)\b", "gesture_mimic", None),
     (r"\b(block|cube)\b", "fetch_block", None),
     (r"\b(pick|grab|bring|fetch|get)\b", "pick_place", "OBJECT"),
@@ -229,6 +230,7 @@ _OBJECT_WORDS = (
     "apple",
     "banana",
     "book",
+    "toothbrush",
     "remote",
     "orange",
     "teddy",

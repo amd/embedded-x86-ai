@@ -5,7 +5,7 @@
 # Portions of this file consist of AI-generated content. AI-assisted
 # content has been reviewed and validated by the authors.
 
-"""ROS 2 camera node - one process per camera (mount / arm).
+"""ROS 2 camera node - one process per camera (operator / arm).
 
 Publishes ``sensor_msgs/Image`` (bgr8) on a configurable topic at a
 configurable rate, plus a ``std_msgs/Bool`` health flag so the orchestrator
@@ -30,9 +30,9 @@ crashing the launch.
 Independent test
 ----------------
     # Terminal 1
-    python -m vla_pipeline.vision.camera_node --role mount
+    python -m vla_pipeline.vision.camera_node --role operator
     # Terminal 2
-    ros2 topic hz /cameras/mount/image_raw
+    ros2 topic hz /cameras/operator/image_raw
 """
 
 from __future__ import annotations
@@ -66,11 +66,17 @@ _ROTATIONS = {
 
 
 class CameraNode(Node):
-    """Owns one V4L2 device and publishes frames + health."""
+    """Owns one V4L2 device and publishes frames + health.
 
-    def __init__(self, role: str, defaults: dict):
+    ``frame_source`` (any object with ``read() -> (ok, frame)`` and
+    ``release()``, e.g. ``so101_sim.SimCamera``) replaces the V4L2 device -
+    that is how the digital twin publishes its wrist camera on the same topic.
+    """
+
+    def __init__(self, role: str, defaults: dict, frame_source=None):
         super().__init__(f"camera_{role}_node")
         self.role = role
+        self._source = frame_source
         self.declare_parameter("device", defaults.get("device", 0))
         self.declare_parameter("width", int(defaults.get("width", 640)))
         self.declare_parameter("height", int(defaults.get("height", 480)))
@@ -103,7 +109,7 @@ class CameraNode(Node):
         self._frame_timer = self.create_timer(1.0 / self._fps, self._tick)
         self._retry_timer = self.create_timer(self._reopen_interval, self._retry)
         self.get_logger().info(
-            f"camera '{role}' device={self._device} {self._size[0]}x{self._size[1]}"
+            f"camera '{role}' device={'sim' if frame_source is not None else self._device} {self._size[0]}x{self._size[1]}"
             f"@{self._fps:.0f} → {p('topic')}"
         )
 
@@ -111,6 +117,9 @@ class CameraNode(Node):
 
     def _open(self) -> None:
         """Open the V4L2 device and configure its resolution/fps/buffer size."""
+        if self._source is not None:
+            self._cap = self._source
+            return
         cap = cv2.VideoCapture(self._device)
         if cap.isOpened():
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._size[0])
@@ -151,7 +160,7 @@ class CameraNode(Node):
                 msg.data = frame.tobytes()
                 self._pub.publish(msg)
                 healthy = True
-            else:
+            elif self._source is None:
                 self._cap.release()
                 self._cap = None
                 self.get_logger().warning(
@@ -177,7 +186,7 @@ def main() -> None:
     if not ROS2_AVAILABLE:
         raise SystemExit("rclpy not importable - source ROS 2 Jazzy before .venv.")
     parser = argparse.ArgumentParser(description="Camera publisher node")
-    parser.add_argument("--role", choices=["mount", "arm"], required=True)
+    parser.add_argument("--role", choices=["operator", "arm"], required=True)
     parser.add_argument("--config", default=None)
     args, ros_args = parser.parse_known_args()
 

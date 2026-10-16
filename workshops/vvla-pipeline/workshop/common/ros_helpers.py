@@ -23,6 +23,10 @@ import math
 
 import numpy as np
 
+# Gripper Torque_Limit (std_msgs/Int32, 0-1000): written by the server node's
+# control loop, the only thread on the bus.
+GRIPPER_TORQUE_TOPIC = "/so101/gripper_torque_limit"
+
 
 def ros2_available() -> bool:
     """True when ``rclpy`` (real or shimmed) is importable."""

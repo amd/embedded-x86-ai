@@ -27,7 +27,7 @@ audio:
   vad:                        # NEW: low-latency end-of-utterance detection
     backend: auto             # auto | webrtc | energy  (auto uses webrtcvad if installed)
     aggressiveness: 2         # webrtcvad mode 0 (lenient) .. 3 (aggressive)
-    hangover_s: 0.35          # silence that ends an utterance (was 1.2 s fixed)
+    hangover_s: 1.2           # silence that ends an utterance (keeps a short pause inside a command)
     pre_roll_s: 0.3           # audio kept from before speech onset
     min_speech_s: 0.25        # reject clicks/coughs shorter than this
 
@@ -56,6 +56,9 @@ llm:
   temperature: 0.0
   parallel: 1
   no_warmup: true             # gfx1151 segfaults on the warmup pass
+  # iGPU sharing with the digital twin's renderer (see so101_sim.bench --contention):
+  #ubatch_size: 256           # shorter GPU submissions -> lower render latency
+  #cu_mask: "0:0-31"          # HSA_CU_MASK: fence llama-server to 32 of 40 CUs
   #hsa_override_gfx_version: "11.5.1"  # Strix Halo
   hsa_override_gfx_version: "11.5.0"  # Strix Point
   #hsa_override_gfx_version: "11.0.0"  # workaround for both
@@ -71,10 +74,11 @@ yolo_pose:
 
 yolo_detect:                  # object detection for voice pick-and-place
   onnx: models/yolo26s/yolo26s.onnx        # exported by scripts/export_yolo26s_detect.py
-  device: npu                 # npu | cpu (both YOLO models + Whisper share the NPU)
+  device: npu                 # npu | cpu
   vitisai_config: config/vaiep_config.json
   imgsz: 640
-  conf_threshold: 0.35
+  conf_threshold: 0.35        # FP32 on the CPU
+  npu_conf_threshold: 0.2     # the NPU runs it in BF16, which scores the same frame up to 0.2 lower
   cache_key: yolo26s_detect_fp32
 
 mediapipe:
@@ -88,26 +92,33 @@ mediapipe:
 # NEW: two-camera architecture. Each camera can be served by its own ROS 2
 # node (vla_pipeline.vision.camera_node) or opened directly by the process.
 cameras:
-  mount:                      # externally mounted, faces the human (pose / mimic)
+  operator:                      # faces the operator (pose / mimic)
     device: /dev/video0
     width: 640
     height: 480
     fps: 30
     rotate: 0
+    source: device            # device (V4L2) | sim (digital-twin render)
     use_ros2: true            # subscribe to the camera node's topic
-    topic: /cameras/mount/image_raw
+    topic: /cameras/operator/image_raw
     stale_after_s: 1.0
   arm:                        # mounted on the end effector (jaws / objects)
     device: /dev/v4l/by-id/usb-icSpring_icspring_camera-video-index0
     width: 640
     height: 480
     fps: 30
-    rotate: 0                 # set 90/180/270 to match the mount orientation
+    rotate: 0                 # set 90/180/270 to match how it is mounted on the gripper
+    source: device            # device | sim (rendered on the twin's gripper)
     use_ros2: true
     topic: /cameras/arm/image_raw
     stale_after_s: 1.0
+    # Calibration for locating objects (pick_place reach: ik), printed by
+    # scripts/calibrate_arm_camera.py. null = the twin's wrist_cam model.
+    intrinsics: null          # {fx, fy, cx, cy, dist: [k1, k2, p1, p2, k3], width, height}
+    mount: null               # camera on the gripper: {pos: [x, y, z] m, rpy: [roll, pitch, yaw] deg}
 
 robot:
+  backend: real               # real (Feetech bus) | sim (MuJoCo digital twin, so101_sim)
   use_ros2: true
   motor_port: /dev/ttyACM0
   robot_id: my_awesome_follower_arm
@@ -128,35 +139,37 @@ behaviors:
     elbow_flex0: 10.0
     wrist_flex0: -10.0
     wrist_roll0: 0.0
-    # --- Per-axis gains (deg per unit of the normalized [-1,1] axis). OVER-DRIVEN
-    #     (~30%+ past each joint's half-span) so every limit is reachable with an
-    #     easy single/two-axis motion; the excess saturates at the safety clamp.
-    pan_gain: 150.0            # left/right (x) → shoulder_pan (overshoots ±115)
-    # forward/back (z): shoulder_lift is the PRIMARY driver - a near hand reaches
-    # its +110 limit on depth alone; elbow_flex goes negative to reach out.
-    sl_fwd_gain: 110.0         # forward/back → shoulder_lift (+ forward, largest term)
-    ef_fwd_gain: -75.0         #              → elbow_flex   (- forward)
-    # up/down (y): elbow_flex at FULL authority leads; shoulder_lift adds the rest
-    # of the up travel; wrist_flex counter-rotates and over-swings to both limits.
-    ef_up_gain: 78.0           # up/down → elbow_flex  (primary, largest up term)
-    sl_up_gain: 58.0           #         → shoulder_lift
-    wf_up_gain: -135.0         #         → wrist_flex (overshoots ±100 about -10)
-    roll_gain: 128.0           # hand roll → wrist_roll (overshoots ±100, saturates)
-    # --- How raw camera signals normalize to the control axes. Tighter windows
-    #     so a smaller hand movement reaches the full joint travel.
+    # --- Per-axis gains (deg per unit of the normalized [-1,1] axis). Tuned on
+    #     the real rig; keep equal to the workshop's mimic: section
+    #     (workshop/solution/config/workshop.yaml). Over-driven so every limit is
+    #     reachable; the excess saturates at MIMIC_LIMITS (utils/gesture_map.py).
+    pan_gain: 150.0            # left/right (x) → shoulder_pan
+    # forward/back (z): shoulder_lift is the PRIMARY driver; elbow_flex goes
+    # negative to reach out.
+    sl_fwd_gain: 110.0         # toward the camera → shoulder_lift
+    sl_fwd_away_gain: 165.0    # away from the camera → shoulder_lift (+50%)
+    ef_fwd_gain: -75.0         # forward/back → elbow_flex (- forward)
+    # up/down (y): shoulder_lift and elbow_flex move as a locked pair.
+    sl_up_gain: 58.0           # up/down → shoulder_lift
+    ef_up_gain: -55.0          #         → elbow_flex (opens as the hand rises)
+    # wrist_flex follows the operator's wrist BEND (hand direction vs the
+    # elbow→wrist forearm), not the hand height.
+    wf_up_gain: 135.0          # wrist bend → wrist_flex (flip sign to invert)
+    wrist_half_deg: 45.0       # ±this hand-vs-forearm bend → full wrist_flex
+    roll_gain: 128.0           # hand roll → wrist_roll (saturates at the clamp)
+    # --- How raw camera signals normalize to the control axes.
     x_center: 0.5              # frame fraction that is "centered" L/R
-    x_half: 0.32               #   ±this fraction → full left/right
+    x_half: 0.384              #   ±this fraction → full left/right
     y_center: 0.5
-    y_half: 0.28               #   ±this fraction → full up/down
+    y_half: 0.336              #   ±this fraction → full up/down
     deadzone: 0.05             # |axis| below this → 0 (kills resting jitter)
-    mirror: true               # mount camera faces the user → mirror left/right
+    mirror: true               # operator camera faces the user → mirror left/right
     # --- Forward/back depth from MediaPipe hand size (fraction of frame height).
     hand_size_neutral: 0.0     # 0 = auto-calibrate from the first frames;
                                #   set via --calibrate-depth for a fixed neutral
-    # More sensitive than before: a hand brought close grows fast, so a smaller
-    # size change now reaches the full forward/back travel. Lower this further if
-    # you still can't reach the forward limit; raise it if depth feels twitchy.
-    depth_rel_span: 0.25       # ±25% size change → full forward/back
+    # Lower this if you can't reach the forward limit; raise it if depth feels
+    # twitchy.
+    depth_rel_span: 0.30       # ±30% size change → full forward/back
     depth_baseline_frames: 8   # frames of hand size to median for the auto neutral
     # --- Wrist roll: primary cue is the DIRECTED thumb→index vector. The angle is
     #     measured RELATIVE to a center that AUTO-CALIBRATES to however you're
@@ -187,8 +200,9 @@ behaviors:
     grip_max: 1.40             # calibrated: spread wide apart -> normalized 1
     grip_close_frac: 0.10      # within the closest 10% of the range -> fully closed
     grip_open_pos: 90.0        # gripper opening (0-100) at full spread (norm 1.0)
-    #grip_start_pos: 90.0      # opening before the first distance is seen (default: open)
-    # --- One Euro smoothing on the four control axes.
+    # Until the first thumb↔index distance is measured the gripper is not
+    # commanded, so a held object stays held.
+    # --- One Euro smoothing on the five control axes.
     smoothing:
       min_cutoff: 1.5          # Hz, lower = smoother at rest
       beta: 0.03               # higher = less lag during fast motion
@@ -201,16 +215,29 @@ behaviors:
   pick_place:                 # NEW: voice-grounded "pick up the <object>"
     # Joint pose from which the arm camera surveys the workspace.
     scan_pose:   {shoulder_pan: 0.0, shoulder_lift: -55.0, elbow_flex: 65.0, wrist_flex: 45.0, wrist_roll: 0.0, gripper: 70.0}
-    # Base approach pose above the workspace; visual servoing refines pan.
-    approach_pose: {shoulder_lift: -35.0, elbow_flex: 45.0, wrist_flex: 35.0}
-    descend_lift: -20.0       # shoulder_lift while descending onto the object
-    servo_gain_pan: 18.0      # deg of pan per unit of normalized horizontal error
-    servo_tolerance: 0.06     # |normalized error| considered centered
-    servo_timeout_s: 6.0
+    scan_pans: [0.0, -14.0, 39.0, -52.0, 71.0]  # sweep the twin workspace; tune for the real camera/FOV
+    # Fallback view of the near-base table, normally hidden behind the jaws.
+    scan_near_pose: {shoulder_pan: 0.0, shoulder_lift: -57.3, elbow_flex: 63.2, wrist_flex: 67.5, wrist_roll: 0.0, gripper: 70.0}
+    scan_near_pans: [0.0, -14.0, 14.0]
+    # ik: locate the object on the table from its box (camera ray meets the
+    # table plane) and solve the reach; fixed: approach_pose + descend_lift.
+    # With ik, no fix or no solve means out of reach; fixed also runs when the arm camera is offline.
+    reach: ik
+    table_z: -0.005           # table surface height in the arm's base frame (m)
+    pregrasp_above_m: 0.06    # ik: jaws open this far above the grasp, then descend in joint space
+    max_grasp_height_m: 0.03  # ik: grasp tall objects no higher than this above the table
+    fixed_jaw_gap_m: 0.005    # ik: after the descent, the hand moves sideways until the fixed finger is this far from a lying object
+    # Fixed reach: jaws ~12 cm above the table; descend_lift brings them down
+    # to a ~4 cm object at ~28 cm range with the closing axis horizontal.
+    approach_pose: {shoulder_lift: -15.0, elbow_flex: 20.0, wrist_flex: 54.0}
+    descend_lift: 9.0         # shoulder_lift while descending onto the object
+    wrist_align_classes: [toothbrush]
+    wrist_align_pregrasp_above_m: 0.10  # pre-grasp height above a thin object
+    wrist_align_grasp_width_m: 0.024     # toothbrush handle width across the jaws
+    wrist_align_center_offset_m: 0.018   # shift from silhouette midpoint toward the narrow handle end
+    wrist_axis_min_elongation: 1.6
     min_box_area_frac: 0.002  # detections smaller than this are noise
     ambiguous_ratio: 1.25     # top-2 score ratio below this = "which one?"
-    handoff_reach: 55.0       # same semantics as fetch_block
-    release_timeout_s: 6.0
     retries: 1                # re-attempts after a failed grip
   dance:
     bpm: 100
@@ -219,7 +246,9 @@ behaviors:
     close_step_deg: 1.5
     stall_eps_deg: 0.4
     stall_ticks: 5
-    settle_extra_deg: 2.0
+    hold_past_contact: 6.0    # after contact the goal trails this far below the jaw (< max_relative_target)
+    reseat_s: 0.6             # ...for this long at Torque_Limit 500 while both fingers seat
+    hold_torque_limit: 240    # Torque_Limit once the object hangs from the fingers: under LeRobot's 25 % Overload_Torque
     stall_grace_s: 0.6        # NEW: keep stall-sampling after full close (thin objects)
     load_threshold: 120.0     # NEW: effort/current contact level (raw Feetech units)
     load_ticks: 3             # NEW: consecutive over-threshold reads = contact
@@ -228,6 +257,28 @@ behaviors:
   wave:                       # NEW
     cycles: 3
   # home / stop need no tunables
+
+# MuJoCo digital twin (robot.backend: sim / ./run_pipeline.sh --digital-twin). Everything
+# here has defaults in so101_sim/src/so101_sim/config.py; listed are the knobs
+# that tie the twin to THIS rig.
+sim:
+  scene: null                 # null = bundled so101_sim/models/scene_vvla.xml
+  physics_hz: 500
+  gl: auto                    # auto (EGL on the iGPU) | egl | osmesa
+  require_hw_gl: false        # true: refuse llvmpipe software rendering
+  viewer: false               # MuJoCo window (needs a display)
+  joint_map:                  # calibrated deg -> MJCF rad (LeRobot homing pose = MJCF zero)
+    shoulder_pan:  {sign: 1, offset_deg: 0.0}
+    shoulder_lift: {sign: 1, offset_deg: 0.0}
+    elbow_flex:    {sign: 1, offset_deg: 0.0}
+    wrist_flex:    {sign: 1, offset_deg: 0.0}
+    wrist_roll:    {sign: 1, offset_deg: 0.0}
+  gripper_map: {open_cal: 95.0, closed_rad: -0.15, open_rad: 1.6}
+  current_model: {idle_a: 0.006, moving_a: 0.15, rated_nm: 0.49, rated_a: 0.65, stall_a: 2.5, stall_torque_nm: 1.91, ma_per_unit: 6.5, noise_units: 3, lpf_hz: 20}  # 7.4 V STS3215
+  cameras:
+    arm:  {camera: wrist_cam, width: 640, height: 480, fps: 30}
+    operator: {camera: operator_cam, width: 640, height: 480, fps: 30}
+    view: {camera: free, width: 800, height: 800, fps: 30, lookat: [0.17, 0.0, 0.18], distance: 0.9}
 
 resource_monitor:
   enabled: true

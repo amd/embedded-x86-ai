@@ -5,7 +5,7 @@
 # Portions of this file consist of AI-generated content. AI-assisted
 # content has been reviewed and validated by the authors.
 
-"""ROS 2 camera node - one process per camera (mount / arm).
+"""ROS 2 camera node - one process per camera (operator / arm).
 
 The server-node half of the camera transport: this node OWNS the V4L2
 device and publishes ``sensor_msgs/Image`` (bgr8) plus a ``std_msgs/Bool``
@@ -21,8 +21,8 @@ publishers, the frame timer, message publishing - is yours.
 
 Notebook: ``notebooks/02_ros2/01_cameras.ipynb``
 Run it for real:
-    python -m ros.camera_node --role mount              # real device
-    python -m ros.camera_node --role mount --synthetic  # no camera needed
+    python -m ros.camera_node --role operator              # real device
+    python -m ros.camera_node --role operator --synthetic  # no camera needed
 """
 
 from __future__ import annotations
@@ -228,7 +228,7 @@ def main() -> None:
             "(offline checks: python -m ros.selftest)"
         )
     parser = argparse.ArgumentParser(description="Camera publisher node")
-    parser.add_argument("--role", choices=["mount", "arm"], required=True)
+    parser.add_argument("--role", choices=["operator", "arm"], required=True)
     parser.add_argument("--config", default=None)
     parser.add_argument(
         "--synthetic",

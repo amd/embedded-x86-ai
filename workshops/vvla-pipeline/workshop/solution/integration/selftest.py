@@ -22,7 +22,7 @@ What it checks, per component-3 TODO:
   stop-event hygiene that keeps a stale stop from killing the next behavior.
 - **3.3 mimic_tick** - one camera frame → pose + hands → mapper → a full,
   clamped arm command; it follows the NEAREST person (largest box) and
-  honors the grip lock so a held object stays held.
+  drives the gripper from the pinch.
 - **3.4 run_dance** - beat-paced choreography that stays stoppable and
   always parks at the rest pose.
 
@@ -98,6 +98,21 @@ def _make_ctx(cfg, *, registry=None):
         registry=registry,
         headless=True,
     )
+
+
+class _FixedPinch:
+    """Scripted hands with the pinch held at one value."""
+
+    def __init__(self, pinch: float):
+        from common.fixtures import ScriptedHands
+
+        self._inner, self._pinch = ScriptedHands(), float(pinch)
+
+    def process(self, frame):
+        obs, raw = self._inner.process(frame)
+        if obs is not None:
+            obs.pinch = self._pinch
+        return obs, raw
 
 
 # =============================================================================
@@ -373,26 +388,27 @@ def check_mimic(rep: Reporter, cfg: dict) -> None:
             "needs mimic_tick first",
         )
 
-    def grip_lock():
-        """Verify a set grip lock overrides the gripper so a held object stays held."""
-        lock_ctx = _make_ctx(cfg)
-        lock_ctx.shared_state["grip_lock"] = True
-        lock_ctx.shared_state["grip_lock_pos"] = 70.0
-        sig = mimic_tick(lock_ctx, frame)
-        assert sig.joints is not None, "grip lock: a command should still be sent"
-        assert abs(sig.joints["gripper"] - 70.0) < 1e-6, (
-            f"gripper={sig.joints['gripper']:.1f} but grip_lock_pos=70 - pass "
-            "ctx.shared_state['grip_lock_pos'] as gripper_override so a held "
-            "object is not dropped mid-mimic"
+    def pinch_drives_gripper():
+        """Verify the pinch reaches the gripper: fingers together close the jaws."""
+        from common.motion import GRIPPER_CLOSED_FLOOR
+
+        grips = {}
+        for label, pinch in (("together", 0.05), ("apart", 1.4)):
+            pinch_ctx = _make_ctx(cfg)
+            pinch_ctx.hands = _FixedPinch(pinch)
+            sig = mimic_tick(pinch_ctx, frame)
+            assert sig.joints is not None, "pinch: a command should be sent"
+            grips[label] = sig.joints["gripper"]
+        assert grips["together"] <= GRIPPER_CLOSED_FLOOR + 1.0 < grips["apart"] - 30.0, (
+            f"gripper {grips['together']:.1f} with the fingers together and "
+            f"{grips['apart']:.1f} with them apart - pass obs.pinch to ctx.mapper.step(pinch=...)"
         )
 
     if ok_tick:
-        rep.run(
-            "3.3", "mimic_tick honors the grip lock (held object stays held)", grip_lock
-        )
+        rep.run("3.3", "mimic_tick drives the gripper from the pinch", pinch_drives_gripper)
     else:
         rep.add(
-            "3.3", "mimic_tick honors the grip lock", "SKIP", "needs mimic_tick first"
+            "3.3", "mimic_tick drives the gripper from the pinch", "SKIP", "needs mimic_tick first"
         )
 
 

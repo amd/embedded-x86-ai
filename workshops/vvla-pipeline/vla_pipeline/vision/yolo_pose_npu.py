@@ -31,7 +31,7 @@ import cv2
 import numpy as np
 
 from vla_pipeline.utils.config import load_config
-from vla_pipeline.utils.npu_session import build_session
+from vla_pipeline.utils.npu_session import build_session, size_npu
 
 logger = logging.getLogger(__name__)
 
@@ -102,14 +102,43 @@ def letterbox(frame_bgr: np.ndarray, imgsz: int) -> tuple[np.ndarray, LetterboxI
     return np.ascontiguousarray(nchw), LetterboxInfo(ratio, pad_x, pad_y)
 
 
+def head_rows(output: np.ndarray, end2end_width: int) -> tuple[np.ndarray, bool]:
+    """One row per candidate from a YOLO head, and whether it is the raw head.
+
+    The end-to-end head is ``[1, 300, end2end_width]`` (xyxy, score, class, ...).
+    The raw head of an older export is ``[1, end2end_width - 1, 8400]``
+    (xywh, scores, ...) and still needs NMS.
+    """
+    preds = np.asarray(output)[0]
+    if preds.shape[-1] == end2end_width:
+        return preds, False
+    return preds.T, True
+
+
+def xywh_to_xyxy(boxes: np.ndarray) -> np.ndarray:
+    """Center-format boxes ``[cx, cy, w, h]`` to corner format ``[x1, y1, x2, y2]``."""
+    out = np.empty_like(boxes)
+    out[:, :2] = boxes[:, :2] - boxes[:, 2:4] / 2
+    out[:, 2:] = boxes[:, :2] + boxes[:, 2:4] / 2
+    return out
+
+
+def nms_keep(boxes: np.ndarray, scores: np.ndarray, iou: float = 0.45) -> np.ndarray:
+    """Indices kept by greedy NMS over xyxy boxes."""
+    xywh = np.concatenate([boxes[:, :2], boxes[:, 2:] - boxes[:, :2]], axis=1)
+    picked = cv2.dnn.NMSBoxes(xywh.tolist(), scores.astype(float).tolist(), 0.0, iou)
+    return np.asarray(picked, dtype=int).reshape(-1)
+
+
 class PoseEstimator:
-    """YOLOv26s-pose ONNX inference (end-to-end head: [1, 300, 57], no NMS)."""
+    """YOLOv26s-pose ONNX inference (end-to-end head [1, 300, 57]; raw head [1, 56, 8400] + NMS)."""
 
     def __init__(self, cfg: dict, device: str | None = None):
         y = cfg["yolo_pose"]
         self.imgsz: int = int(y["imgsz"])
         self.conf_threshold: float = float(y["conf_threshold"])
         self.kpt_threshold: float = float(y["kpt_threshold"])
+        size_npu(cfg, device)
         self.session = build_session(
             y["onnx"],
             device or y["device"],
@@ -133,13 +162,20 @@ class PoseEstimator:
         nchw, info = letterbox(frame_bgr, self.imgsz)
         outputs = self.session.run(None, {self.input_name: nchw})
 
-        preds = outputs[0][0]  # [300, 57]
-        boxes = preds[:, :4].copy()
+        preds, raw = head_rows(outputs[0], 57)
+        if raw:
+            boxes = xywh_to_xyxy(preds[:, :4])
+            kpts = preds[:, 5:].reshape(-1, 17, 3).copy()
+        else:
+            boxes = preds[:, :4].copy()
+            kpts = preds[:, 6:].reshape(-1, 17, 3).copy()
         scores = preds[:, 4]
-        kpts = preds[:, 6:].reshape(-1, 17, 3).copy()
 
         mask = scores > conf
         boxes, scores, kpts = boxes[mask], scores[mask], kpts[mask]
+        if raw and len(boxes):
+            keep = nms_keep(boxes, scores)
+            boxes, scores, kpts = boxes[keep], scores[keep], kpts[keep]
         if len(boxes) == 0:
             return boxes, scores, kpts
 
@@ -224,7 +260,7 @@ def main() -> None:
         cv2.VideoCapture(args.video)
         if args.video
         else cv2.VideoCapture(
-            args.cam if args.cam is not None else cfg["cameras"]["mount"]["device"]
+            args.cam if args.cam is not None else cfg["cameras"]["operator"]["device"]
         )
     )
     if not cap.isOpened():

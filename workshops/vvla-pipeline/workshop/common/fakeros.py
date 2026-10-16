@@ -90,6 +90,13 @@ class String:
         self.data = str(data)
 
 
+class Int32:
+    """In-memory stand-in for ``std_msgs/Int32``."""
+
+    def __init__(self, data=0):
+        self.data = int(data)
+
+
 # ----------------------------------------------------------------------------
 # QoS
 # ----------------------------------------------------------------------------
@@ -473,7 +480,7 @@ def install(force: bool = False) -> bool:
 
     std_msgs = types.ModuleType("std_msgs")
     std_msgs_msg = types.ModuleType("std_msgs.msg")
-    std_msgs_msg.Bool, std_msgs_msg.String = Bool, String
+    std_msgs_msg.Bool, std_msgs_msg.String, std_msgs_msg.Int32 = Bool, String, Int32
     std_msgs.msg = std_msgs_msg
 
     sys.modules.update(

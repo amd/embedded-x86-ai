@@ -9,7 +9,7 @@
 
 Roles
 -----
-- ``mount`` - externally mounted, faces the human. Feeds gesture-mimic pose
+- ``operator`` - faces the person. Feeds gesture-mimic pose
   tracking and person finding.
 - ``arm``   - mounted on the SO-101 end effector. Feeds object detection in
   the jaws/workspace and pick-and-place visual servoing.
@@ -25,7 +25,7 @@ client retries the device in the background.
 
 Independent test
 ----------------
-    python -m vla_pipeline.vision.camera --role mount          # direct preview
+    python -m vla_pipeline.vision.camera --role operator          # direct preview
     python -m vla_pipeline.vision.camera --role arm --ros2     # via topic
 """
 
@@ -118,6 +118,24 @@ class DirectCamera(CameraClient):
             return False, None
         return True, frame
 
+    def read_after(self, settled_at: float) -> tuple[bool, np.ndarray | None]:
+        """Discard buffered frames until a read blocks for a new exposure.
+
+        ``settled_at`` is when the arm finished moving. A buffered frame
+        returns immediately; the frame that blocks for the next exposure was
+        captured after the move.
+        """
+        period = 1.0 / max(self._fps, 1.0)
+        ok, frame = False, None
+        for _ in range(8):
+            started = time.perf_counter()
+            ok, frame = self.read()
+            if not ok or frame is None:
+                return False, None
+            if time.perf_counter() - started >= 0.5 * period:
+                return True, frame
+        return bool(ok), frame
+
     def close(self) -> None:
         """Release the OpenCV capture device."""
         if self._cap is not None:
@@ -180,10 +198,53 @@ class Ros2Camera(CameraClient):
                 return False, None
             return True, self._frame
 
+    def read_after(self, settled_at: float) -> tuple[bool, np.ndarray | None]:
+        """Newest cached frame whose stamp is later than ``settled_at``."""
+        deadline = time.time() + max(self._stale_after, 0.5)
+        while time.time() < deadline:
+            with self._lock:
+                if self._frame is not None and self._stamp > settled_at:
+                    return True, self._frame
+            time.sleep(0.02)
+        return False, None
+
     def close(self) -> None:
         """Shut down the executor and destroy the subscriber node."""
         self._executor.shutdown()
         self._node.destroy_node()
+
+
+class SimCameraClient(CameraClient):
+    """A camera rendered by the in-process MuJoCo digital twin (``source: sim``).
+
+    Shares the process-wide twin with ``SimArmClient`` so the wrist camera
+    moves with the simulated arm. Over ROS 2 (``use_ros2: true``) the twin's
+    node publishes the same frames on the normal topic instead.
+    """
+
+    def __init__(self, cfg: dict, role: str):
+        from so101_sim import SimCamera
+
+        from vla_pipeline.robot.sim_arm import sim_world
+
+        self.role = role
+        self._cam = SimCamera(sim_world(cfg), role, blocking=True)
+
+    def read(self) -> tuple[bool, np.ndarray | None]:
+        """Next rendered frame (paced at the camera fps, like a V4L2 read)."""
+        return self._cam.read()
+
+    def read_after(self, settled_at: float) -> tuple[bool, np.ndarray | None]:
+        """Frame rendered after the arm finished moving at ``settled_at``."""
+        return self._cam.read_after(settled_at)
+
+    def ok(self) -> bool:
+        """Return True once the renderer has produced a frame."""
+        return self._cam.ok()
+
+    def close(self) -> None:
+        """Release this view of the twin's renderer."""
+        self._cam.release()
 
 
 def make_camera(cfg: dict, role: str) -> CameraClient:
@@ -201,6 +262,8 @@ def make_camera(cfg: dict, role: str) -> CameraClient:
         }
     if c.get("use_ros2", False):
         return Ros2Camera(role, c["topic"], stale_after_s=c.get("stale_after_s", 1.0))
+    if c.get("source", "device") == "sim":
+        return SimCameraClient(cfg, role)
     return DirectCamera(
         role,
         c.get("device", 0),
@@ -226,7 +289,7 @@ def main() -> None:
     )
     parser = argparse.ArgumentParser(description="Camera client - component test")
     parser.add_argument("--config", default=None)
-    parser.add_argument("--role", choices=["mount", "arm"], default="mount")
+    parser.add_argument("--role", choices=["operator", "arm"], default="operator")
     parser.add_argument(
         "--ros2",
         action="store_true",

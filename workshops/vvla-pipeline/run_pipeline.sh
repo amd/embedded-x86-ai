@@ -12,10 +12,12 @@
 #   ./run_pipeline.sh                     # voice control, full hardware
 #   ./run_pipeline.sh --text-commands     # type commands instead of speaking
 #   ./run_pipeline.sh --dry-run           # no robot hardware
+#   ./run_pipeline.sh --digital-twin      # no robot hardware: MuJoCo twin of the arm,
+#                                         #   shown in the twin console window
 #   ./run_pipeline.sh --headless          # no preview windows
 #
 # When robot.use_ros2: true in config/pipeline.yaml, starts the SO-101 server
-# node AND both camera nodes (mount + arm) in the background - equivalent to
+# node AND both camera nodes (operator + arm) in the background - equivalent to
 # `ros2 launch launch/strix_vla.launch.py` - then runs the orchestrator.
 set -eo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,7 +56,7 @@ cfg = load_config()
 robot = str(cfg["robot"].get("use_ros2", False)).lower()
 cams = cfg.get("cameras") or {}
 cam_ros2 = any(str((cams.get(r) or {}).get("use_ros2", False)).lower() == "true"
-               for r in ("mount", "arm"))
+               for r in ("operator", "arm"))
 print(f"{robot} {str(cam_ros2).lower()}")
 PY
 )"
@@ -73,7 +75,11 @@ cleanup() {
 trap cleanup EXIT
 
 DRY=""
-for a in "$@"; do [[ "$a" == "--dry-run" ]] && DRY="--dry-run"; done
+SIM=""
+for a in "$@"; do
+  [[ "$a" == "--dry-run" ]] && DRY="--dry-run"
+  [[ "$a" == "--digital-twin" ]] && SIM="--digital-twin"
+done
 
 # ---------------------------------------------------------------------------
 # One-time interactive calibration. The server node runs backgrounded (no TTY),
@@ -81,7 +87,7 @@ for a in "$@"; do [[ "$a" == "--dry-run" ]] && DRY="--dry-run"; done
 # calibrate() would hit EOF on input(). Detect it here and calibrate in the
 # FOREGROUND (this terminal) before starting any background processes.
 # ---------------------------------------------------------------------------
-if [[ -z "$DRY" ]]; then
+if [[ -z "$DRY" && -z "$SIM" ]]; then
   NEED_CAL="$(python - <<'PY'
 from vla_pipeline.utils.config import load_config
 from vla_pipeline.robot.arm_interface import calibration_exists
@@ -102,17 +108,24 @@ PY
   fi
 fi
 
-if [[ "$ROBOT_ROS2" == "true" ]]; then
+if [[ -n "$SIM" && -z "$DRY" && "$ROBOT_ROS2" == "true" ]]; then
+  # The twin hosts the arm server AND the arm camera (they share the physics).
+  echo "Starting the SO-101 digital twin (arm + arm camera)..."
+  python -m so101_sim.node --config config/pipeline.yaml --stack pipeline --sim-cameras arm &
+  PIDS+=($!)
+elif [[ "$ROBOT_ROS2" == "true" ]]; then
   echo "Starting SO-101 ROS 2 server node..."
   python -m vla_pipeline.robot.robot_node --server $DRY &
   PIDS+=($!)
 fi
 if [[ "$CAMERA_ROS2" == "true" ]]; then
-  echo "Starting camera nodes (mount + arm)..."
-  python -m vla_pipeline.vision.camera_node --role mount &
+  echo "Starting camera nodes..."
+  python -m vla_pipeline.vision.camera_node --role operator &
   PIDS+=($!)
-  python -m vla_pipeline.vision.camera_node --role arm &
-  PIDS+=($!)
+  if [[ -z "$SIM" || -n "$DRY" || "$ROBOT_ROS2" != "true" ]]; then
+    python -m vla_pipeline.vision.camera_node --role arm &
+    PIDS+=($!)
+  fi
 fi
 [[ ${#PIDS[@]} -gt 0 ]] && sleep 2
 

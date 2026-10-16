@@ -13,16 +13,17 @@ The image is treated as a control surface and its signals are mapped straight
 onto SO-101 joints - the same absolute-target, limit-clamped commands that
 ``test_ros2_arm_motion`` issues - rather than solving the human arm's geometry:
 
-- **YOLOv26s-pose (NPU)** → the wrist keypoint's position in the frame:
-  horizontal → left/right (shoulder_pan), vertical → up/down. Up/down is carried
-  by elbow_flex at full authority plus shoulder_lift's lower ~50% plus a
-  wrist_flex fine-tune (an extension of elbow_flex that keeps the gripper level).
-  The YOLO wrist is also the **fallback controller**: when MediaPipe loses the
-  hand the robot keeps following the wrist for x/y until the hand returns.
+- **YOLOv26s-pose (NPU)** → the nearest person's right wrist position in the
+  frame: horizontal → left/right (shoulder_pan), vertical → up/down
+  (shoulder_lift and elbow_flex as a locked pair). The right elbow gives the
+  forearm direction for wrist_flex. The YOLO wrist is also the **fallback
+  controller**: when MediaPipe loses the hand the robot keeps following the
+  wrist for x/y until the hand returns.
 - **MediaPipe Hands (CPU)** →
     * hand **size** (how near the hand is) → forward/back (z): reaching forward
-      extends shoulder_lift through its upper half (50%→100%) with elbow_flex
-      negative; the opposite pulls back,
+      extends shoulder_lift with elbow_flex negative; the opposite pulls back,
+    * wrist→knuckle direction measured against the forearm (the wrist bend)
+      → wrist_flex,
     * thumb↔index **line** (with the knuckle-line reference, then the wrist→knuckle
       angle, as reliability-weighted fallbacks) → wrist_roll (forward-most = the
       calibration midpoint, 0),
@@ -30,11 +31,10 @@ onto SO-101 joints - the same absolute-target, limit-clamped commands that
       first ``grip_close_frac`` of the calibrated min/max range, then opening
       linearly up to ~90%.
 
-Grip-lock: after the *grip* behavior captures an object it sets
-``shared_state['grip_lock']``; while locked, gesture-mimic forces the stored
-gripper position so the object stays held while the arm keeps mirroring. The
-gripper otherwise holds its last position whenever the hand is unseen and only
-moves when a new thumb↔index distance is measured.
+The pinch always drives the gripper: a grip locked by *grip* or *pick_place*
+is released when mimic starts (``vla_pipeline.main``), so a held object drops
+when the fingers open. The gripper holds its last position whenever the hand
+is unseen and only moves when a new thumb↔index distance is measured.
 
 Depth neutral (optional, one-time per camera position):
     python -m vla_pipeline.behaviors.gesture_mimic --calibrate-depth
@@ -70,10 +70,6 @@ from vla_pipeline.vision.yolo_pose_npu import KP, PoseEstimator
 
 logger = logging.getLogger(__name__)
 
-# COCO-17 wrists: prefer whichever is more confidently seen this frame.
-_WRISTS = (KP["l_wrist"], KP["r_wrist"])
-
-
 def _primary_person(pose: PoseEstimator, frame):
     """Largest-box detection → (kpts[17,3], boxes, scores, kpts_all) or Nones.
 
@@ -87,13 +83,18 @@ def _primary_person(pose: PoseEstimator, frame):
     return kpts_all[int(np.argmax(areas))], boxes, scores, kpts_all
 
 
-def _wrist_xy(kpts, thr: float) -> tuple[float, float] | None:
-    """Pixel (x, y) of the more-visible wrist, or None if neither is reliable."""
-    best, best_v = None, thr
-    for w in _WRISTS:
-        if kpts[w, 2] >= best_v:
-            best, best_v = (float(kpts[w, 0]), float(kpts[w, 1])), float(kpts[w, 2])
-    return best
+def _pick_arm(kpts, thr: float, side: str = "r"):
+    """(wrist_xy, elbow_xy) of one fixed arm (default right), like the workshop.
+
+    wrist_xy is None when that wrist is below ``thr`` (and then so is elbow_xy);
+    elbow_xy is None when only the elbow is below it.
+    """
+    w, e = KP[f"{side}_wrist"], KP[f"{side}_elbow"]
+    if kpts[w, 2] < thr:
+        return None, None
+    wrist = (float(kpts[w, 0]), float(kpts[w, 1]))
+    elbow = (float(kpts[e, 0]), float(kpts[e, 1])) if kpts[e, 2] >= thr else None
+    return wrist, elbow
 
 
 def run_gesture_mimic(
@@ -101,20 +102,18 @@ def run_gesture_mimic(
     arm: ArmClient,
     pose: PoseEstimator,
     hands: HandTracker,
-    camera,  # CameraClient (mount role)
-    shared_state: dict | None = None,
+    camera,  # CameraClient (operator role)
     stop_check=None,
     show_preview: bool = True,
 ) -> None:
     """Run the mimic loop until 'q', Ctrl-C, or ``stop_check()`` is True."""
-    shared_state = shared_state if shared_state is not None else {}
     mapper = mapper_from_config(cfg)
     thr = pose.kpt_threshold
     missing = 0  # consecutive frames with no person (→ reset to avoid a jump)
 
     logger.info(
         "Gesture mimic running (direct camera-frame mapping) - show your "
-        "hand to the mount camera. Move it around the frame; reach in/out "
+        "hand to the operator camera. Move it around the frame; reach in/out "
         "for forward/back; tilt to roll; pinch to grip."
     )
     try:
@@ -123,14 +122,16 @@ def run_gesture_mimic(
                 break
             ok, frame = camera.read()
             if not ok:
-                logger.warning("Mount camera frame unavailable - holding pose.")
+                logger.warning("Operator camera frame unavailable - holding pose.")
                 time.sleep(0.05)
                 continue
             h, w = frame.shape[:2]
 
             # --- Hand location from YOLO pose (NPU) ---
             kpts, boxes, scores, kpts_all = _primary_person(pose, frame)
-            wrist_xy = _wrist_xy(kpts, thr) if kpts is not None else None
+            wrist_xy, elbow_xy = (
+                _pick_arm(kpts, thr) if kpts is not None else (None, None)
+            )
             if kpts is None:
                 missing += 1
                 if missing == 5:
@@ -147,12 +148,8 @@ def run_gesture_mimic(
             roll_ti_w = obs.roll_ti_weight if obs is not None else 0.0
             pinch = obs.pinch if obs is not None else None
 
-            gripper_override = None
-            if shared_state.get("grip_lock"):
-                gripper_override = float(shared_state.get("grip_lock_pos", 0.0))
-
             # --- Map → command (skip while we have neither a hand nor a wrist) ---
-            if wrist_xy is not None or obs is not None or gripper_override is not None:
+            if wrist_xy is not None or obs is not None:
                 joints = mapper.step(
                     wrist_xy,
                     w,
@@ -163,7 +160,7 @@ def run_gesture_mimic(
                     roll_ref_deg=roll_ref,
                     roll_ti_weight=roll_ti_w,
                     pinch=pinch,
-                    gripper_override=gripper_override,
+                    elbow_xy=elbow_xy,
                 )
                 arm.send_joints(joints)
             else:
@@ -174,7 +171,7 @@ def run_gesture_mimic(
                 if kpts is not None:
                     vis = pose.draw(frame, boxes, scores, kpts_all)
                 vis = hands.draw(vis, obs, mp_results)
-                _hud(vis, joints, wrist_xy, obs, shared_state)
+                _hud(vis, joints, wrist_xy, obs)
                 cv2.imshow("gesture_mimic", vis)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
@@ -196,12 +193,11 @@ def run_gesture_mimic(
         arm.go_to_rest(resend_s=None)
 
 
-def _hud(vis, joints, wrist_xy, obs, shared_state) -> None:
+def _hud(vis, joints, wrist_xy, obs) -> None:
     """Draw a compact status line + the commanded joints for the operator."""
-    lock = " [GRIP LOCKED]" if shared_state.get("grip_lock") else ""
     cv2.putText(
         vis,
-        f"gesture mimic [direct]{lock} - 'q' to stop",
+        "gesture mimic [direct] - 'q' to stop",
         (12, 30),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.8,
@@ -211,12 +207,12 @@ def _hud(vis, joints, wrist_xy, obs, shared_state) -> None:
     if wrist_xy is not None:
         cv2.circle(vis, (int(wrist_xy[0]), int(wrist_xy[1])), 8, (0, 255, 0), 2)
     if joints:
-        grip_deg = joints.get("gripper", 0)
-        grip_name = _grip_label(grip_deg)
+        grip_deg = joints.get("gripper")  # absent until MediaPipe reports a pinch
+        grip = "hold" if grip_deg is None else f"{grip_deg:3.0f} ({_grip_label(grip_deg)})"
         line = (
             f"pan {joints['shoulder_pan']:+5.0f}  lift {joints['shoulder_lift']:+5.0f}  "
             f"elb {joints['elbow_flex']:+5.0f}  wflex {joints['wrist_flex']:+5.0f}  "
-            f"roll {joints['wrist_roll']:+5.0f}  grip {grip_deg:3.0f} ({grip_name})"
+            f"roll {joints['wrist_roll']:+5.0f}  grip {grip}"
         )
         cv2.putText(
             vis,
@@ -251,7 +247,7 @@ def calibrate_depth(
     """Measure the neutral hand size at a comfortable mid-distance and print the
     ``hand_size_neutral`` value to paste into ``config/pipeline.yaml``."""
     print(
-        "\nHold your open hand toward the mount camera at a comfortable "
+        "\nHold your open hand toward the operator camera at a comfortable "
         "mid-distance (the pose you want to be 'neither forward nor back')."
     )
     input("Press Enter when in position... ")
@@ -359,7 +355,7 @@ def main() -> None:
     from vla_pipeline.vision.camera import make_camera
 
     hands = HandTracker(cfg)
-    camera = make_camera(cfg, "mount")
+    camera = make_camera(cfg, "operator")
     if args.calibrate_depth or args.calibrate_grip:
         try:
             if args.calibrate_depth:

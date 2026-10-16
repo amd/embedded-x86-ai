@@ -31,6 +31,7 @@
 #   4. Builds llama.cpp with HIP/ROCm for the DETECTED arch into third_party/
 #   5. Downloads the models:
 #        - Whisper-base ONNX encoder/decoder
+#        - Whisper tokenizer + feature extractor (openai/whisper-base.en)
 #        - Llama-3.2-3B-Instruct GGUF Q4_K_M        (hf download)
 #      YOLO ONNX export is manual (Ultralytics is AGPL-3.0). See the README:
 #        python scripts/export_yolo26s_pose.py
@@ -113,6 +114,71 @@ fi
 log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Pin the torch build just installed, and reject the NVIDIA CUDA stack.
+# optimum, lerobot, and ultralytics all depend on torch. Without this pin,
+# uv installs the default PyPI wheel, which downloads nvidia-cublas,
+# nvidia-cudnn-cu13, cuda-toolkit, and the rest. nvidia-ml-py is not in
+# this list: ultralytics imports it, and it is a small Python binding,
+# not the CUDA libraries.
+write_torch_constraints() {
+  local dest="$1"
+  "${VENV_DIR}/bin/python" - <<'PY' >"$dest"
+import importlib.metadata as m
+for name in ("torch", "torchvision", "torchaudio"):
+    print(f"{name}=={m.version(name)}")
+print(
+    "\n".join(
+        [
+            "nvidia-cublas<0",
+            "nvidia-cuda-cupti<0",
+            "nvidia-cuda-nvrtc<0",
+            "nvidia-cuda-runtime<0",
+            "nvidia-cudnn-cu12<0",
+            "nvidia-cudnn-cu13<0",
+            "nvidia-cufft<0",
+            "nvidia-cufile<0",
+            "nvidia-curand<0",
+            "nvidia-cusolver<0",
+            "nvidia-cusparse<0",
+            "nvidia-cusparselt-cu12<0",
+            "nvidia-cusparselt-cu13<0",
+            "nvidia-nccl-cu12<0",
+            "nvidia-nccl-cu13<0",
+            "nvidia-nvjitlink<0",
+            "nvidia-nvshmem-cu12<0",
+            "nvidia-nvshmem-cu13<0",
+            "nvidia-nvtx<0",
+            "cuda-bindings<0",
+            "cuda-pathfinder<0",
+            "cuda-toolkit<0",
+        ]
+    )
+)
+PY
+}
+
+# Drop CUDA wheels left behind when an earlier resolver installed PyPI torch
+# and a later step replaced only the torch package.
+strip_nvidia_cuda() {
+  local -a cuda_pkgs=()
+  mapfile -t cuda_pkgs < <("${VENV_DIR}/bin/python" - <<'PY'
+import importlib.metadata as m
+keep = {"nvidia-ml-py"}
+for dist in m.distributions():
+    name = dist.metadata["Name"]
+    low = name.lower().replace("_", "-")
+    if low in keep:
+        continue
+    if low.startswith("nvidia-") or low.startswith("cuda-"):
+        print(name)
+PY
+)
+  if ((${#cuda_pkgs[@]})); then
+    log "Removing NVIDIA CUDA packages that this AMD system does not use: ${cuda_pkgs[*]}"
+    uv pip uninstall "${cuda_pkgs[@]}"
+  fi
+}
 
 # Print the iGPU/dGPU gfx arch (e.g. gfx1150). Tries the LLVM helper, then
 # rocminfo, then both again under sudo - a user freshly added to the
@@ -355,28 +421,39 @@ source "${VENV_DIR}/bin/activate"
 # -----------------------------------------------------------------------------
 # 3. Python dependencies
 # -----------------------------------------------------------------------------
-log "Installing Python dependencies into the venv"
-uv pip install -r "${REPO_ROOT}/requirements.txt"
-
+# Install the ROCm (or CPU) torch BEFORE requirements.txt. optimum depends on
+# torch, and the default PyPI wheel is a CUDA build: resolving it downloads
+# nvidia-cublas, nvidia-cudnn-cu13, cuda-toolkit, and the rest of that stack.
+# Nothing on this AMD machine runs those libraries. The constraint file then
+# keeps lerobot and later installs from replacing the pinned wheel.
+log "Installing PyTorch before the rest of the Python dependencies"
 if [[ "$CPU_ONLY" -eq 0 ]]; then
   log "Installing PyTorch ROCm wheels for ${GFX_ARCH} (AMD repo)"
   uv pip install --index-url "$ROCM_WHL_INDEX" \
     "$TORCH_SPEC" "$TORCHVISION_SPEC" "$TORCHAUDIO_SPEC" \
-    || warn "ROCm torch install failed - check ${ROCM_WHL_INDEX} availability; falling back to whatever torch resolves."
+    || die "ROCm torch install failed. Do not install the PyPI torch wheel; it downloads the NVIDIA CUDA stack. Check ${ROCM_WHL_INDEX}."
   # NOTE: the Ryzen AI onnxruntime (VitisAI EP) wheels are installed in
   # section 4b, AFTER requirements/torch/lerobot, so no later dependency
   # resolution can clobber them with a stock or ROCm onnxruntime.
 else
   log "--cpu-only: installing CPU torch"
-  uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+  uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu \
+    || die "CPU torch install failed."
 fi
+TORCH_CONSTRAINT="$(mktemp)"
+write_torch_constraints "$TORCH_CONSTRAINT"
+
+log "Installing Python dependencies into the venv"
+uv pip install -c "$TORCH_CONSTRAINT" -r "${REPO_ROOT}/requirements.txt"
 
 log "Installing LeRobot (feetech extras) from source"
 mkdir -p "$THIRD_PARTY"
 if [[ ! -d "${THIRD_PARTY}/lerobot/.git" ]]; then
   git clone https://github.com/huggingface/lerobot.git "${THIRD_PARTY}/lerobot"
 fi
-uv pip install -e "${THIRD_PARTY}/lerobot[feetech]"
+uv pip install -c "$TORCH_CONSTRAINT" -e "${THIRD_PARTY}/lerobot[feetech]"
+rm -f "$TORCH_CONSTRAINT"
+strip_nvidia_cuda
 
 # -----------------------------------------------------------------------------
 # 4. llama.cpp with HIP/ROCm
@@ -498,6 +575,18 @@ else
 fi
 
 # -----------------------------------------------------------------------------
+# 4c2. SO-101 digital twin (run_pipeline.sh --digital-twin, app.py --digital-twin)
+# -----------------------------------------------------------------------------
+# Editable and --no-deps so the twin can't re-resolve numpy; its deps are
+# installed alongside numpy<2. The STL meshes are fetched (pinned + checksummed)
+# rather than committed.
+log "Installing the SO-101 digital twin (so101_sim, MuJoCo)"
+uv pip install 'mujoco>=3.1.3' 'PyOpenGL>=3.1' 'numpy<2' \
+  && uv pip install --no-deps -e "${REPO_ROOT}/so101_sim" \
+  && python -m so101_sim.assets \
+  || warn "Digital twin install incomplete - --digital-twin will not work. Retry: python -m so101_sim.assets"
+
+# -----------------------------------------------------------------------------
 # 4d. Enforce GUI-enabled OpenCV (LAST pip action, like onnxruntime)
 # -----------------------------------------------------------------------------
 # yolo_pose_npu.py and the mediapipe demo open windows via cv2.imshow(), which
@@ -532,6 +621,16 @@ dest = resolve(cfg.get("system", {}).get("models_dir", "models")) / mt
 enc, dec = download_whisper_onnx(mt, dest_dir=dest)
 print("encoder:", enc)
 print("decoder:", dec)
+PY
+
+  log "Caching the Whisper tokenizer and feature extractor"
+  PYTHONPATH="${REPO_ROOT}" python - <<'PY' || warn "Whisper tokenizer download failed - the first voice run will try Hugging Face again. Check the network, then rerun ./bootstrap.sh --skip-apt --skip-llama."
+from vla_pipeline.audio.whisper_npu import download_whisper_tokenizer
+from vla_pipeline.utils.config import load_config
+cfg = load_config()
+w = cfg["whisper"]
+tok = download_whisper_tokenizer(w.get("model_type", "whisper-base"), w.get("tokenizer"))
+print("tokenizer:", tok)
 PY
 
   log "YOLO ONNX export is a manual setup step — see README"

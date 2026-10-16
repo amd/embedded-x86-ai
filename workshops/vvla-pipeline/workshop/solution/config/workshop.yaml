@@ -31,7 +31,8 @@ yolo_detect:                        # eyes (what to grab) - NPU
   device: npu
   vitisai_config: config/vaiep_config.json
   imgsz: 640
-  conf_threshold: 0.35
+  conf_threshold: 0.35              # FP32 on the CPU
+  npu_conf_threshold: 0.2           # the NPU runs it in BF16, which scores the same frame up to 0.2 lower
   cache_key: yolo26s_detect_fp32
 
 mediapipe:                          # fingers (pinch) - CPU
@@ -42,6 +43,23 @@ mediapipe:                          # fingers (pinch) - CPU
   min_detection_confidence: 0.5
   min_tracking_confidence: 0.5
   roll_ti_full_px: 40.0
+
+whisper:                            # ears (speech → text) - CPU (common/speech.py)
+  encoder_onnx: ../../models/whisper-base/encoder_model.onnx
+  decoder_onnx: ../../models/whisper-base/decoder_model.onnx
+  tokenizer: openai/whisper-base.en # must match the checkpoint (English-only base)
+  language: en
+  cpu_threads: 4                    # per session; ONNX Runtime's default takes every core and starves the twin
+
+audio:                              # microphone + voice-activity detection
+  mic_device: null                  # null = default input (or an index from `python -m sounddevice`)
+  silence_threshold: 0.015          # energy-VAD noise floor (RMS) when webrtcvad is missing
+  vad_aggressiveness: 2             # webrtcvad mode 0 (lenient) .. 3 (aggressive)
+  hangover_s: 1.2                   # silence that ends an utterance (keeps a short pause inside a command)
+  pre_roll_s: 0.3                   # audio kept from before speech onset
+  min_speech_s: 0.25                # reject clicks/coughs shorter than this
+  max_utterance_s: 12.0
+  startup_grace_s: 1.5              # ignore the mic's first noisy moments
 
 llm:                                # brain (intent) - iGPU via llama.cpp + ROCm/HIP
   server_bin: ../../third_party/llama.cpp/build/bin/llama-server
@@ -60,14 +78,15 @@ llm:                                # brain (intent) - iGPU via llama.cpp + ROCm
 # --- Component 2: ROS 2 nodes & topics ---------------------------------------
 
 cameras:
-  mount:                            # externally mounted, faces the human
+  operator:                            # externally mounted, faces the human
     device: /dev/video0
     width: 640
     height: 480
     fps: 30
     rotate: 0
+    source: device                  # device (V4L2) | sim (digital-twin render)
     use_ros2: true
-    topic: /cameras/mount/image_raw
+    topic: /cameras/operator/image_raw
     stale_after_s: 1.0
   arm:                              # mounted on the end effector
     device: /dev/v4l/by-id/usb-icSpring_icspring_camera-video-index0
@@ -75,11 +94,16 @@ cameras:
     height: 480
     fps: 30
     rotate: 0
+    source: device                  # device | sim (rendered on the twin's gripper)
     use_ros2: true
     topic: /cameras/arm/image_raw
     stale_after_s: 1.0
+    # for locating objects (pick_place reach: ik); print with scripts/calibrate_arm_camera.py
+    intrinsics: null                # {fx, fy, cx, cy, dist, width, height}; null = twin camera model
+    mount: null                     # {pos: [x, y, z] m, rpy: [r, p, y] deg} on the gripper; null = twin
 
 robot:
+  backend: real                     # real (Feetech bus) | sim (MuJoCo digital twin)
   use_ros2: true
   motor_port: /dev/ttyACM0
   robot_id: my_awesome_follower_arm
@@ -91,6 +115,15 @@ robot:
                                # exactly how gesture_mimic drives the arm
   command_topic: /so101/joint_command
   state_topic: /so101/joint_state
+
+sim:                                # MuJoCo digital twin (app.py --digital-twin, so101_sim.node)
+  physics_hz: 500
+  gl: auto                          # auto (EGL on the iGPU) | egl | osmesa
+  gripper_map: {open_cal: 95.0, closed_rad: -0.15, open_rad: 1.6}
+  cameras:
+    arm:  {camera: wrist_cam, width: 640, height: 480, fps: 30}
+    operator: {camera: operator_cam, width: 640, height: 480, fps: 30}
+    view: {camera: free, width: 800, height: 800, fps: 30, lookat: [0.17, 0.0, 0.18], distance: 0.9}
 
 intent_node:                        # the Llama intent node (component 2)
   transcript_topic: /vla/transcript # std_msgs/String in (what was said)
@@ -138,3 +171,44 @@ dance:
 
 wave:
   cycles: 3
+
+# Manipulation behaviors (provided, common/manipulation.py) - the pipeline's values.
+grip:                               # close until contact, confirm with the arm camera
+  close_step_deg: 1.5
+  stall_eps_deg: 0.4                # measured lagging the command by this much = stalled
+  stall_ticks: 5
+  hold_past_contact: 6.0            # after contact the goal trails this far below the jaw
+  reseat_s: 0.6                     # ...for this long at Torque_Limit 500 while both fingers seat
+  hold_torque_limit: 240            # Torque_Limit once the object hangs from the fingers: under the 25 % Overload_Torque
+  stall_grace_s: 0.6                # keep sampling after full close (thin objects)
+  load_threshold: 120.0             # Present_Current counts that mean contact
+  load_ticks: 3
+  jaw_roi: [0.30, 0.45, 0.70, 0.95] # arm-camera region between the jaws (fractions)
+  jaw_diff_threshold: 0.06
+
+pick_place:                         # "pick up the ball": detect on the arm camera, grasp, hand over
+  scan_pose: {shoulder_pan: 0.0, shoulder_lift: -55.0, elbow_flex: 65.0, wrist_flex: 45.0, wrist_roll: 0.0, gripper: 70.0}
+  scan_pans: [0.0, -14.0, 39.0, -52.0, 71.0]  # sweep workspace; tune for the real camera/FOV
+  scan_near_pose: {shoulder_pan: 0.0, shoulder_lift: -57.3, elbow_flex: 63.2, wrist_flex: 67.5, wrist_roll: 0.0, gripper: 70.0}
+  scan_near_pans: [0.0, -14.0, 14.0]  # fallback for near objects hidden behind the jaws
+  reach: ik                         # ik: locate on the table + IK (no solve = out of reach) | fixed
+  table_z: -0.005                   # table surface height in the arm's base frame (m)
+  pregrasp_above_m: 0.06            # ik: jaws open this far above the grasp, then descend in joint space
+  max_grasp_height_m: 0.03          # ik: grasp tall objects no higher than this
+  fixed_jaw_gap_m: 0.005            # ik: after the descent, the hand moves sideways until the fixed finger is this far from a lying object
+  approach_pose: {shoulder_lift: -15.0, elbow_flex: 20.0, wrist_flex: 54.0}  # fixed: jaws ~12 cm up
+  descend_lift: 9.0                 # down to a ~4 cm object, closing axis horizontal
+  wrist_align_classes: [toothbrush]
+  wrist_align_pregrasp_above_m: 0.10
+  wrist_align_grasp_width_m: 0.024
+  wrist_align_center_offset_m: 0.018
+  wrist_axis_min_elongation: 1.6
+  min_box_area_frac: 0.002
+  ambiguous_ratio: 1.25
+  retries: 1
+
+fetch_block:                        # "bring me the block": taught pose, grasp, hand over
+  block_pose: {shoulder_pan: 35.0, shoulder_lift: -45.0, elbow_flex: 60.0, wrist_flex: 40.0, wrist_roll: 0.0, gripper: 35.0}
+  lift_pose: {shoulder_pan: 35.0, shoulder_lift: -80.0, elbow_flex: 85.0, wrist_flex: 50.0, wrist_roll: 0.0, gripper: 5.0}
+  handoff_reach: 55.0
+  release_timeout_s: 6.0

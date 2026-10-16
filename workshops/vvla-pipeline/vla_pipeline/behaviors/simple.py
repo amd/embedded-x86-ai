@@ -21,21 +21,15 @@ from __future__ import annotations
 import argparse
 import logging
 
-from vla_pipeline.robot.arm_interface import ArmClient, DryRunArm, make_arm
+from vla_pipeline.robot.arm_interface import ArmClient, DryRunArm, ensure_common_path, make_arm
 from vla_pipeline.utils.config import load_config
 
-logger = logging.getLogger(__name__)
+ensure_common_path()
 
-_WAVE_UP = {
-    "shoulder_pan": 0.0,
-    "shoulder_lift": -10.0,
-    "elbow_flex": 80.0,
-    "wrist_flex": -30.0,
-    "wrist_roll": 0.0,
-    "gripper": 60.0,
-}
-_WAVE_LEFT = {"wrist_roll": -45.0, "wrist_flex": -10.0}
-_WAVE_RIGHT = {"wrist_roll": 45.0, "wrist_flex": -10.0}
+from common.motion import WAVE_LEFT as _WAVE_LEFT  # noqa: E402
+from common.motion import WAVE_RIGHT as _WAVE_RIGHT, WAVE_UP as _WAVE_UP
+
+logger = logging.getLogger(__name__)
 
 
 def run_wave(cfg: dict, arm: ArmClient, stop_check=None) -> None:
@@ -52,8 +46,8 @@ def run_wave(cfg: dict, arm: ArmClient, stop_check=None) -> None:
 
 
 def run_home(cfg: dict, arm: ArmClient, stop_check=None) -> None:
-    """Return to the rest pose (also clears nothing - grip-lock is respected
-    by gesture-mimic, not by going home; release with the grip command)."""
+    """Return to the rest pose. A locked grip stays locked: "release" opens
+    it, and gesture-mimic hands the gripper to the pinch."""
     logger.info("[home] returning to rest pose")
     arm.go_to_rest()
 

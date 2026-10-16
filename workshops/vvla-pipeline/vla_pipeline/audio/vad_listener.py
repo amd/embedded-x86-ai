@@ -15,15 +15,18 @@ This module replaces that with a proper VAD front end:
 
 - a **pre-roll ring buffer** (~0.3 s) so the first syllable isn't clipped
   while the detector is still deciding;
-- **end-of-speech hangover of ~0.35 s** (config ``audio.vad.hangover_s``)
-  instead of 1.2 s - transcription starts the moment the user stops talking;
+- **end-of-speech hangover of ~1.2 s** (config ``audio.vad.hangover_s``)
+  so a short pause inside a command is not a new command. The clock is the
+  detector's own silence decision. An energy floor here never elapsed on a
+  real microphone, so phrases stayed open and were never transcribed;
 - backend ``webrtcvad`` when installed (config ``audio.vad.backend: auto``),
   else an adaptive-noise-floor energy detector (no new hard dependency);
 - minimum speech length to reject coughs/keyboard clacks.
 
-Latency budget after this change (whisper-base on the NPU, llama on iGPU):
-hangover 0.35 s + ASR ~0.2-0.4 s + intent ~0.1 s ≈ **0.7-0.9 s** from
-end-of-speech to behavior dispatch.
+Latency budget (whisper-base on the NPU, llama on iGPU): hangover 1.2 s +
+ASR ~0.2-0.4 s + intent ~0.1 s from end-of-speech to behavior dispatch.
+Transcription runs off the microphone thread, so capture keeps going while
+Whisper decodes.
 
 The detection core (:class:`SpeechSegmenter`) is pure block-in/segment-out so
 it unit-tests without a microphone:
@@ -37,6 +40,7 @@ from __future__ import annotations
 import argparse
 import logging
 import queue
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -56,7 +60,7 @@ class VadConfig:
     backend: str = "auto"  # auto | webrtc | energy
     aggressiveness: int = 2  # webrtcvad mode 0..3
     silence_threshold: float = 0.015  # energy backend floor (RMS)
-    hangover_s: float = 0.35  # end-of-speech silence
+    hangover_s: float = 0.7  # end-of-speech silence
     pre_roll_s: float = 0.3
     min_speech_s: float = 0.25
     max_utterance_s: float = 12.0
@@ -70,7 +74,7 @@ class VadConfig:
             backend=str(v.get("backend", "auto")),
             aggressiveness=int(v.get("aggressiveness", 2)),
             silence_threshold=float(a.get("silence_threshold", 0.015)),
-            hangover_s=float(v.get("hangover_s", 0.35)),
+            hangover_s=float(v.get("hangover_s", 0.7)),
             pre_roll_s=float(v.get("pre_roll_s", 0.3)),
             min_speech_s=float(v.get("min_speech_s", 0.25)),
             max_utterance_s=float(a.get("max_utterance_s", 12.0)),
@@ -256,13 +260,46 @@ class FastListener:
                 )
                 return text or None
 
-    def run_forever(self, on_transcript, stop_check=None) -> None:
+    def run_forever(self, on_transcript, stop_check=None, on_level=None, on_busy=None) -> None:
         """Continuous loop: every finished utterance → ``on_transcript(text)``.
 
         Used by the orchestrator's listener thread so the mic stays hot while
         behaviors run (lets "stop" interrupt a running behavior).
+        ``on_level(rms, in_speech)``, if given, is called once per audio block.
+        Whisper runs on its own thread: the microphone keeps feeding the
+        segmenter while a phrase is decoded. ``on_busy(True/False)`` brackets
+        that decode.
         """
         seg = SpeechSegmenter(self.vcfg)
+        jobs: queue.Queue[np.ndarray] = queue.Queue()
+
+        def _decode() -> None:
+            while not (stop_check and stop_check()):
+                try:
+                    audio = jobs.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if on_busy is not None:
+                    on_busy(True)
+                try:
+                    t0 = time.perf_counter()
+                    text = (self.transcriber(audio) or "").strip()
+                    logger.info(
+                        "ASR %.1fs audio in %.0f ms: %r",
+                        len(audio) / SAMPLE_RATE,
+                        (time.perf_counter() - t0) * 1e3,
+                        text,
+                    )
+                except Exception:
+                    logger.exception("transcription failed")
+                    text = ""
+                finally:
+                    if on_busy is not None:
+                        on_busy(False)
+                if text:
+                    on_transcript(text)
+
+        threading.Thread(target=_decode, daemon=True, name="asr").start()
         try:
             stream, q_audio = self._stream()
         except Exception as e:
@@ -275,11 +312,10 @@ class FastListener:
                 except queue.Empty:
                     continue
                 audio = seg.push(block)
-                if audio is None:
-                    continue
-                text = (self.transcriber(audio) or "").strip()
-                if text:
-                    on_transcript(text)
+                if on_level is not None:
+                    on_level(float(np.sqrt(np.mean(np.square(block)))), seg.in_speech)
+                if audio is not None:
+                    jobs.put(audio)
 
 
 # =============================================================================
@@ -359,6 +395,26 @@ def _selftest() -> int:
     ok = count == 2
     print(
         f"  [{'PASS' if ok else 'FAIL'}] back-to-back utterances → {count} segments (expect 2)"
+    )
+    failures += not ok
+
+    # 4. A detector gap longer than the hangover ends the phrase. Holding the
+    # phrase open on raw microphone energy never elapsed in a real room.
+    class _Gap:
+        def __init__(self):
+            self.n = 0
+
+        def is_speech(self, _block):
+            self.n += 1
+            return 14 <= self.n <= 23 or 41 <= self.n <= 53
+
+    seg = SpeechSegmenter(cfg)
+    seg._vad = _Gap()
+    sig = np.concatenate([silence(0.4), speech(1.2), silence(1.0)])
+    count = sum(1 for b in blocks(sig) if seg.push(b) is not None)
+    ok = count == 2
+    print(
+        f"  [{'PASS' if ok else 'FAIL'}] detector gap longer than hangover → {count} segments (expect 2)"
     )
     failures += not ok
 

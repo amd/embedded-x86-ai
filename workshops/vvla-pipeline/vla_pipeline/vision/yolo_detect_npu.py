@@ -12,7 +12,7 @@ Same structure as :class:`vla_pipeline.vision.yolo_pose_npu.PoseEstimator`
 80-class COCO detection head ([1, 300, 6]: xyxy, score, class). Used by:
 
 - ``pick_place`` - locate the object named in the voice command ("pick up
-  the **ball**") in the arm/mount camera frame;
+  the **ball**") in the arm/operator camera frame;
 - ``grip`` - optional verification that an object is present between the jaws.
 
 Spoken names are matched through a synonym table (``"ball" → sports ball``)
@@ -36,8 +36,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from vla_pipeline.utils.config import load_config
-from vla_pipeline.utils.npu_session import build_session
-from vla_pipeline.vision.yolo_pose_npu import letterbox
+from vla_pipeline.utils.npu_session import build_session, size_npu
+from vla_pipeline.vision.yolo_pose_npu import head_rows, letterbox, nms_keep, xywh_to_xyxy
 
 logger = logging.getLogger(__name__)
 
@@ -127,14 +127,20 @@ COCO_NAMES = [
 # Spoken-word → COCO class synonyms (lowercased, applied after exact match).
 SYNONYMS = {
     "ball": "sports ball",
+    "sports_ball": "sports ball",
+    "soccer": "sports ball",
+    "soccer ball": "sports ball",
+    "football": "sports ball",
+    "foot ball": "sports ball",
     "cube": None,
-    "block": None,  # cube/block: see note below
+    "block": None,
     "phone": "cell phone",
     "mobile": "cell phone",
     "glass": "wine glass",
     "mug": "cup",
     "pen": None,
     "pencil": None,
+    "brush": "toothbrush",
     "drink": "bottle",
     "water bottle": "bottle",
     "computer": "laptop",
@@ -144,8 +150,8 @@ SYNONYMS = {
     "controller": "remote",
 }
 # Classes with value None aren't in COCO-80; pick_place reports "can't
-# recognize that object" rather than guessing. Fine-tune YOLO26 on your own
-# objects (cube, pen...) and extend this table to ground them.
+# recognize that object" rather than guessing. The twin uses four real COCO
+# classes: sports ball, book, bottle, and toothbrush.
 
 
 @dataclass
@@ -192,18 +198,22 @@ def resolve_class(spoken: str) -> str | None:
 
 
 class ObjectDetector:
-    """YOLOv26s detection ONNX inference (end-to-end head [1, 300, 6], no NMS)."""
+    """YOLOv26s detection ONNX inference (end-to-end head [1, 300, 6]; raw head [1, 84, 8400] + NMS)."""
 
     def __init__(self, cfg: dict, device: str | None = None):
         y = cfg["yolo_detect"]
         self.imgsz: int = int(y["imgsz"])
-        self.conf_threshold: float = float(y["conf_threshold"])
+        size_npu(cfg, device)
         self.session = build_session(
             y["onnx"],
             device or y["device"],
             vitisai_config=y.get("vitisai_config", "config/vaiep_config.json"),
             cache_dir=cfg.get("system", {}).get("cache_dir", "cache"),
             cache_key=y["cache_key"],
+        )
+        on_npu = "VitisAIExecutionProvider" in self.session.get_providers()
+        self.conf_threshold: float = float(
+            y.get("npu_conf_threshold", y["conf_threshold"]) if on_npu else y["conf_threshold"]
         )
         self.input_name = self.session.get_inputs()[0].name
 
@@ -213,12 +223,20 @@ class ObjectDetector:
         """Run detection on one frame and return all detections above the confidence threshold."""
         conf = self.conf_threshold if conf is None else conf
         nchw, info = letterbox(frame_bgr, self.imgsz)
-        preds = self.session.run(None, {self.input_name: nchw})[0][0]  # [300, 6]
+        preds, raw = head_rows(self.session.run(None, {self.input_name: nchw})[0], 6)
+        if raw:
+            boxes = xywh_to_xyxy(preds[:, :4])
+            scores, classes = preds[:, 4:].max(axis=1), preds[:, 4:].argmax(axis=1)
+        else:
+            boxes, scores, classes = preds[:, :4], preds[:, 4], preds[:, 5]
+        mask = scores > conf
+        boxes, scores, classes = boxes[mask], scores[mask], classes[mask]
+        if raw and len(boxes):
+            keep = nms_keep(boxes, scores)
+            boxes, scores, classes = boxes[keep], scores[keep], classes[keep]
         out: list[Detection] = []
         h, w = frame_bgr.shape[:2]
-        for x1, y1, x2, y2, score, cls in preds:
-            if score <= conf:
-                continue
+        for (x1, y1, x2, y2), score, cls in zip(boxes, scores, classes):
             box = np.array([x1, y1, x2, y2], dtype=np.float32)
             box[[0, 2]] = np.clip((box[[0, 2]] - info.pad_x) / info.ratio, 0, w)
             box[[1, 3]] = np.clip((box[[1, 3]] - info.pad_y) / info.ratio, 0, h)
@@ -280,7 +298,7 @@ def main() -> None:
         description="YOLOv26s detection on Ryzen AI NPU - component test"
     )
     parser.add_argument("--config", default=None)
-    parser.add_argument("--role", choices=["mount", "arm"], default="arm")
+    parser.add_argument("--role", choices=["operator", "arm"], default="arm")
     parser.add_argument(
         "--find", default=None, help="highlight matches for a spoken name"
     )

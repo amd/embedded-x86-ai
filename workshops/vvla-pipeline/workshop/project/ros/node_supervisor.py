@@ -32,15 +32,16 @@ Two properties make this safe to run automatically:
 Python API (used by ``app.py``)::
 
     from ros.node_supervisor import NodeSupervisor
-    with NodeSupervisor(cfg, nodes=["arm", "camera_mount"]) as sup:
+    with NodeSupervisor(cfg, nodes=["arm", "camera_operator"]) as sup:
         ...   # the arm/camera server nodes are live for the duration
 
 CLI::
 
     python -m ros.node_supervisor              # all nodes, real hardware
     python -m ros.node_supervisor --mock       # intent node uses keyword brain
-    python -m ros.node_supervisor --only arm,camera_mount
+    python -m ros.node_supervisor --only arm,camera_operator
     python -m ros.node_supervisor --dry-run --synthetic --mock   # laptop/CI
+    python -m ros.node_supervisor --digital-twin  # MuJoCo twin: arm + arm camera
 
 The CLI blocks until Ctrl-C (or SIGTERM), then shuts every child down cleanly.
 """
@@ -67,7 +68,7 @@ PACKAGE_DIR = Path(__file__).resolve().parents[1]
 
 # Order matters: the arm parks safely and cameras are cheap; the intent node is
 # last because it may spin up llama-server.
-ALL_NODES = ("arm", "camera_mount", "camera_arm", "intent")
+ALL_NODES = ("arm", "camera_operator", "camera_arm", "intent")
 
 
 @dataclass
@@ -84,9 +85,21 @@ class _Child:
 
 
 def _node_specs(
-    cfg: dict, keys, *, dry_run: bool, synthetic: bool, mock: bool
+    cfg: dict,
+    keys,
+    *,
+    dry_run: bool,
+    synthetic: bool,
+    mock: bool,
+    sim: bool = False,
+    config_path=None,
 ) -> list[_Child]:
-    """Build the ordered :class:`_Child` specs for the requested node ``keys``."""
+    """Build the ordered :class:`_Child` specs for the requested node ``keys``.
+
+    ``sim``: the arm server is the MuJoCo digital twin (``so101_sim.node``),
+    which also publishes the arm camera rendered on its gripper - physics and
+    camera must share one process, so no separate ``camera_arm`` child.
+    """
     cams = cfg.get("cameras") or {}
     robot = cfg.get("robot") or {}
     intent = cfg.get("intent_node") or {}
@@ -97,16 +110,16 @@ def _node_specs(
             ready_topic=robot.get("state_topic", "/so101/joint_state"),
             argv=["ros.arm_node", *(["--dry-run"] if dry_run else [])],
         ),
-        "camera_mount": _Child(
-            key="camera_mount",
-            label="mount camera",
-            ready_topic=(cams.get("mount") or {}).get(
-                "topic", "/cameras/mount/image_raw"
+        "camera_operator": _Child(
+            key="camera_operator",
+            label="operator camera",
+            ready_topic=(cams.get("operator") or {}).get(
+                "topic", "/cameras/operator/image_raw"
             ),
             argv=[
                 "ros.camera_node",
                 "--role",
-                "mount",
+                "operator",
                 *(["--synthetic"] if synthetic else []),
             ],
         ),
@@ -128,6 +141,18 @@ def _node_specs(
             argv=["ros.intent_node", *(["--mock"] if mock else [])],
         ),
     }
+    if sim:
+        cfg_file = str(config_path or PACKAGE_DIR / "config" / "workshop.yaml")
+        specs["arm"] = _Child(
+            key="arm",
+            label="SO-101 digital twin (arm + arm camera)",
+            ready_topic=robot.get("state_topic", "/so101/joint_state"),
+            argv=["so101_sim.node", "--config", cfg_file, "--stack", "workshop",
+                  "--sim-cameras", "arm"],
+        )
+        keys = [k for k in keys if k != "camera_arm"]
+        if "arm" not in keys and "camera_arm" in keys:
+            keys = ["arm", *keys]
     return [specs[k] for k in keys if k in specs]
 
 
@@ -142,12 +167,20 @@ class NodeSupervisor:
         dry_run: bool = False,
         synthetic: bool = False,
         mock: bool = False,
+        sim: bool = False,
+        config_path=None,
         ready_timeout_s: float = 20.0,
     ):
         self.cfg = cfg
         self.ready_timeout_s = float(ready_timeout_s)
         self._children = _node_specs(
-            cfg, nodes, dry_run=dry_run, synthetic=synthetic, mock=mock
+            cfg,
+            nodes,
+            dry_run=dry_run,
+            synthetic=synthetic,
+            mock=mock,
+            sim=sim,
+            config_path=config_path,
         )
         self._probe = None  # lazily-created rclpy probe node
         self._stopped = False
@@ -309,6 +342,9 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="arm node: no hardware")
     ap.add_argument("--synthetic", action="store_true", help="camera nodes: no device")
     ap.add_argument("--mock", action="store_true", help="intent node: keyword brain")
+    ap.add_argument(
+        "--digital-twin", action="store_true", help="arm + arm camera: MuJoCo digital twin"
+    )
     ap.add_argument("--ready-timeout", type=float, default=20.0)
     args = ap.parse_args()
 
@@ -336,6 +372,8 @@ def main() -> int:
         dry_run=args.dry_run,
         synthetic=args.synthetic,
         mock=args.mock,
+        sim=args.digital_twin,
+        config_path=args.config,
         ready_timeout_s=args.ready_timeout,
     )
     try:

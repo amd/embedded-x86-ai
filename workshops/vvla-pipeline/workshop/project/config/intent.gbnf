@@ -5,7 +5,7 @@
 root    ::= "{" ws "\"command\"" ws ":" ws cmd ws "," ws "\"object\"" ws ":" ws obj ws "}"
 
 cmd     ::= "\"gesture_mimic\"" | "\"fetch_block\"" | "\"pick_place\"" |
-            "\"dance\"" | "\"grip\"" | "\"wave\"" | "\"home\"" |
+            "\"dance\"" | "\"grip\"" | "\"release\"" | "\"wave\"" | "\"home\"" |
             "\"stop\"" | "\"unknown\""
 
 # Object: empty, or 1-2 lowercase words ("ball", "water bottle").

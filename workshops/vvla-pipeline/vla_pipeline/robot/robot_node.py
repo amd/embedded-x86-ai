@@ -47,6 +47,7 @@ import time
 logger = logging.getLogger(__name__)
 
 from vla_pipeline.robot.arm_interface import (
+    GRASP_LIMITS,
     MOTOR_NAMES,
     REST_POSE,
     ArmClient,
@@ -57,10 +58,15 @@ from vla_pipeline.utils.config import load_config
 
 try:  # ROS 2 is optional at import time so non-ROS machines can run dry tests
     import rclpy
-    from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
+    from rclpy.executors import (
+        ExternalShutdownException,
+        MultiThreadedExecutor,
+        SingleThreadedExecutor,
+    )
     from rclpy.node import Node
     from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
     from sensor_msgs.msg import JointState
+    from std_msgs.msg import Int32
 
     ROS2_AVAILABLE = True
 except ImportError:  # pragma: no cover
@@ -72,11 +78,14 @@ except ImportError:  # pragma: no cover
 EFFORT_SAMPLE_EVERY_N_TICKS = 3
 
 # Transient bus errors ("There is no status packet!") are retried at the
-# transport layer (DirectArm._bus_retry in arm_interface). The control loop's
+# transport layer (LeRobotArm._bus_retry in common.motion). The control loop's
 # job is just to survive a transaction that fails anyway: a genuinely dead link
 # (power/wiring) fails every tick, so cap the log rate - warn on the first
 # failure, then once every Nth after that - instead of flooding the console.
 BUS_ERROR_LOG_EVERY_N = 30
+
+# Gripper Torque_Limit (std_msgs/Int32, 0-1000). Reliable: one write, not a stream.
+GRIPPER_TORQUE_TOPIC = "/so101/gripper_torque_limit"
 
 
 def _require_ros2() -> None:
@@ -112,7 +121,7 @@ def _joint_state(node, names, positions, effort=None) -> "JointState":
 class So101ServerNode(Node):
     """Owns the SO-101 Feetech bus; bridges it to ROS 2 topics."""
 
-    def __init__(self, cfg: dict, dry_run: bool = False):
+    def __init__(self, cfg: dict, dry_run: bool = False, arm: ArmClient | None = None):
         _require_ros2()
         super().__init__("so101_server_node")
         r = cfg["robot"]
@@ -128,11 +137,19 @@ class So101ServerNode(Node):
             "False",
         )
 
-        if dry_run or not r.get("enable_motors", True):
-            self._arm: ArmClient = DryRunArm(verbose=False)
+        if arm is not None:
+            self._arm: ArmClient = arm
+            self.get_logger().info(f"Bus transport injected: {type(arm).__name__}")
+        elif dry_run or not r.get("enable_motors", True):
+            self._arm = DryRunArm(verbose=False)
             self.get_logger().warn("Motors DISABLED - dry-run mode")
+        elif r.get("backend", "real") == "sim":
+            from vla_pipeline.robot.sim_arm import SimArmClient
+
+            self._arm = SimArmClient(cfg)
+            self.get_logger().info("Bus: MuJoCo digital twin (robot.backend=sim)")
         else:
-            from vla_pipeline.robot.arm_interface import DirectArm, calibration_exists
+            from vla_pipeline.robot.arm_interface import LeRobotArm, calibration_exists
 
             # Calibration is interactive; the server usually runs backgrounded
             # (no TTY), so detect a missing file up front and fail with an
@@ -145,13 +162,19 @@ class So101ServerNode(Node):
                     "    python -m vla_pipeline.robot.arm_interface --calibrate\n"
                     "(run_pipeline.sh now does this automatically before launch)."
                 )
-            self._arm = DirectArm(
+            self._arm = LeRobotArm(
                 r["motor_port"], r["robot_id"], r.get("max_relative_target", 8.0)
             )
             self.get_logger().info(f"SO101Follower connected on {r['motor_port']}")
+        # The client already clamped this move. The bus backstop is the grasp
+        # envelope (wrist_flex to 90°). The desk cap (67.5°) is what the
+        # client applies to ordinary moves; applying it again here pulls a
+        # solved toothbrush grasp back up off the object.
+        self._arm._send_limits = GRASP_LIMITS
 
         self._target_lock = threading.Lock()
         self._target: dict[str, float] = dict(REST_POSE)
+        self._target_gen = 0
         self._last_cmd_time = 0.0
         self._gripper_load: float = math.nan  # nan = feedback unavailable
         self._tick_count = 0
@@ -162,10 +185,16 @@ class So101ServerNode(Node):
         # value actually written so unchanged ticks are skipped.
         self._direct_goal = r.get("max_relative_target", 8.0) is None
         self._last_sent_target: dict[str, float] | None = None
+        self._torque_limit: int | None = None  # next gripper Torque_Limit to write
 
         self.create_subscription(
             JointState, r["command_topic"], self._on_command, _best_effort_qos()
         )
+        self.create_subscription(Int32, GRIPPER_TORQUE_TOPIC, self._on_torque_limit, 10)
+        if getattr(self._arm, "world", None) is not None:
+            from std_srvs.srv import Trigger
+
+            self.create_service(Trigger, "/so101/reset_scene", self._on_reset_scene)
         self._state_pub = self.create_publisher(
             JointState, r["state_topic"], _best_effort_qos()
         )
@@ -178,6 +207,20 @@ class So101ServerNode(Node):
             f"{self._control_fps:.0f} Hz"
         )
 
+    def _on_reset_scene(self, _request, response):
+        """Park the twin and put its props back on their starting spots."""
+        from vla_pipeline.robot.arm_interface import restore_twin
+
+        with self._target_lock:
+            parked = restore_twin(self._arm)
+            self._target = dict(parked)
+            self._last_cmd_time = time.time()
+            self._last_sent_target = None
+            self._target_gen += 1
+        response.success = True
+        response.message = "arm parked, objects back on the table"
+        return response
+
     def _on_command(self, msg: "JointState") -> None:
         """Merge an incoming JointState command into the current target."""
         joints = {
@@ -186,15 +229,20 @@ class So101ServerNode(Node):
         if not joints:
             return
         with self._target_lock:
-            self._target.update(clamp_joints(joints))
+            self._target.update(clamp_joints(joints, GRASP_LIMITS))
             self._last_cmd_time = time.time()
+
+    def _on_torque_limit(self, msg: "Int32") -> None:
+        """Queue a gripper Torque_Limit for the control loop (the only bus thread)."""
+        with self._target_lock:
+            self._torque_limit = int(msg.data)
 
     def _control_loop(self) -> None:
         """Sequential observe → act loop (one thread on the bus, no contention).
 
         Both bus transactions - the command *write* and the state *read* - run
         inside one guard. Transient serial errors are retried in the transport
-        (DirectArm._bus_retry); if a transaction still fails here, the tick is
+        (LeRobotArm._bus_retry); if a transaction still fails here, the tick is
         logged and skipped rather than letting the exception escape, kill this
         daemon thread, and leave the arm uncommanded for the rest of the run.
 
@@ -219,13 +267,20 @@ class So101ServerNode(Node):
             with self._target_lock:
                 target = dict(self._target)
                 fresh = (time.time() - self._last_cmd_time) < 1.0
+                generation = self._target_gen
+                torque_limit, self._torque_limit = self._torque_limit, None
 
             try:
+                if torque_limit is not None:
+                    self._arm.set_gripper_torque_limit(torque_limit)
                 if fresh:  # hold last pose silently when commands stop
+                    with self._target_lock:
+                        if generation != self._target_gen:
+                            fresh = False  # a scene reset replaced this goal
                     # Direct-goal mode: write only when the goal changes so the
                     # servo's onboard profile runs once, uninterrupted. Streaming
                     # mode writes every tick (each tick carries a new setpoint).
-                    if not self._direct_goal or target != self._last_sent_target:
+                    if fresh and (not self._direct_goal or target != self._last_sent_target):
                         _s = time.perf_counter()
                         self._arm.send_joints(target)
                         p_send_s += time.perf_counter() - _s
@@ -306,7 +361,7 @@ class So101ServerNode(Node):
         except Exception as e:
             msg = str(e)
             if "Torque_Enable" in msg:
-                # Torque-off is disabled on disconnect (see DirectArm.__init__), so
+                # Torque-off is disabled on disconnect (see LeRobotArm.__init__), so
                 # this normally won't fire. If it does, a servo didn't ack a torque
                 # write during close - non-fatal here (the port is closing), but
                 # worth surfacing rather than crashing the shutdown.
@@ -333,6 +388,7 @@ class Ros2ArmClient(ArmClient):
         self._pub = self._node.create_publisher(
             JointState, r["command_topic"], _best_effort_qos()
         )
+        self._torque_pub = self._node.create_publisher(Int32, GRIPPER_TORQUE_TOPIC, 10)
         self._state_lock = threading.Lock()
         self._state: dict[str, float] | None = None
         self._effort: float | None = None
@@ -345,7 +401,8 @@ class Ros2ArmClient(ArmClient):
         # with a single thread" warning seen in the logs.
         self._executor = SingleThreadedExecutor()
         self._executor.add_node(self._node)
-        self._spin_thread = threading.Thread(target=self._executor.spin, daemon=True)
+        self._spin_stop = threading.Event()
+        self._spin_thread = threading.Thread(target=self._spin, daemon=True, name="so101_arm_client")
         self._spin_thread.start()
 
         deadline = time.time() + state_timeout_s
@@ -355,10 +412,21 @@ class Ros2ArmClient(ArmClient):
                     logger.info("Ros2ArmClient: state stream live.")
                     return
             time.sleep(0.05)
+        self.close()
         raise TimeoutError(
             f"No JointState on {r['state_topic']} within {state_timeout_s}s - "
             "is the server node running? (python -m vla_pipeline.robot.robot_node --server)"
         )
+
+    def _spin(self) -> None:
+        """Spin in short slices until :meth:`close`. A thread still inside
+        ``executor.spin()`` when Python exits aborts the process ("terminate
+        called without an active exception"), so ``close()`` must join it."""
+        while not self._spin_stop.is_set():
+            try:
+                self._executor.spin_once(timeout_sec=0.1)
+            except ExternalShutdownException:
+                return
 
     def _on_state(self, msg: "JointState") -> None:
         """Update the cached joint state and gripper effort from an incoming JointState."""
@@ -372,9 +440,29 @@ class Ros2ArmClient(ArmClient):
             self._state = state
             self._effort = effort
 
+    def reset_sim(self) -> bool:
+        """Ask the digital-twin server to park the arm and restore the props."""
+        from std_srvs.srv import Trigger
+
+        if not hasattr(self, "_reset_client"):
+            self._reset_client = self._node.create_client(Trigger, "/so101/reset_scene")
+        if not self._reset_client.wait_for_service(timeout_sec=0.5):
+            return False
+        future = self._reset_client.call_async(Trigger.Request())
+        deadline = time.time() + 2.0
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.02)
+        result = future.result() if future.done() else None
+        return bool(result and result.success)
+
     def send_joints(self, joints: dict[str, float]) -> None:
-        """Publish joints as a JointState command."""
-        joints = clamp_joints(joints)
+        """Publish joints as a JointState command.
+
+        ``go_to(limits=GRASP_LIMITS)`` has already set ``_send_limits``.
+        Clamping with the desk cap here drops a 90° wrist to 67.5° before
+        the server ever sees the grasp.
+        """
+        joints = clamp_joints(joints, self._send_limits)
         names = list(joints.keys())
         self._pub.publish(_joint_state(self._node, names, [joints[k] for k in names]))
 
@@ -390,8 +478,17 @@ class Ros2ArmClient(ArmClient):
         with self._state_lock:
             return self._effort
 
+    def set_gripper_torque_limit(self, value: int) -> None:
+        """Publish the gripper Torque_Limit; the server writes it on its next tick."""
+        msg = Int32()
+        msg.data = int(min(max(int(value), 0), 1000))
+        self._torque_pub.publish(msg)
+        self.gripper_torque_limit = msg.data
+
     def close(self) -> None:
-        """Shut down the executor and destroy the client node."""
+        """Stop and join the spin thread, then shut down the executor and destroy the node."""
+        self._spin_stop.set()
+        self._spin_thread.join(timeout=2.0)
         self._executor.shutdown()
         self._node.destroy_node()
 

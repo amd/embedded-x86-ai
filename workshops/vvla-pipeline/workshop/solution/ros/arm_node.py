@@ -7,27 +7,39 @@
 
 """The SO-101 server node - the ONE process that owns the robot bus.
 
-Exactly one process may talk to the Feetech serial bus; this node is it.
-Everything else (behaviors, the UI, your terminal) publishes joint targets
-on ``/so101/joint_command`` and reads ``/so101/joint_state`` back. That
-topic contract is what makes the system restartable and inspectable:
-``ros2 topic echo /so101/joint_state`` works no matter what owns the bus.
+Exactly one process may talk to the Feetech serial bus; this node is it. It
+is the hardware side of ros2_control: ``topic_based_ros2_control`` (run by
+``launch/so101_control.launch.py``) publishes the controllers' joint
+setpoints on ``robot.command_topic`` and reads the arm back on
+``robot.state_topic``; the launch remaps both onto
+``/so101/hardware/joint_commands`` and ``/so101/hardware/joint_states``.
+Behaviors talk to the controllers (``ros/arm_client.py``), never to this
+node, and ``ros2 topic echo /joint_states`` shows the arm no matter what
+owns the bus.
 
-Message convention (``sensor_msgs/JointState``, degrees):
-- ``name``/``position`` - absolute joint targets; PARTIAL dicts are legal
-  (command just the gripper and the rest holds).
-- ``effort[i]`` on the state topic - the gripper servo's current for
-  ``name[i] == "gripper"``; **NaN when the bus can't read it**. NaN is the
-  honest "unavailable", and clients must treat it as None, not as a number.
+Message convention (``sensor_msgs/JointState``, radians):
+- ``name``/``position`` - absolute joint setpoints; PARTIAL commands are
+  legal (command just the gripper and the rest holds);
+- ``velocity`` on the state topic - each joint's speed in rad/s, from the
+  change in position since the last tick;
+- ``effort[i]`` on the state topic - the gripper servo's torque in N·m for
+  ``name[i] == "gripper"``, from its current; **NaN when the bus can't read
+  it**. NaN is the honest "unavailable", and clients must treat it as None,
+  not as a number.
+
+The bus works in calibrated degrees; the twin's joint map
+(:class:`so101_sim.mapping.JointMap`) converts at this node's topics. The
+gripper's torque limit is this node's ``gripper_torque_limit_nm`` parameter.
 
 The control loop thread (provided) is the same observe→act pattern the real
-pipeline uses: one thread on the bus, no contention. Your TODOs are the ROS
-wiring around it.
+pipeline uses: one thread on the bus, no contention. It writes every fresh
+setpoint - the controllers interpolate - through the bus transport's
+per-tick clamp. Your TODOs are the ROS wiring around it.
 
 Notebook: ``notebooks/02_ros2/02_robot.ipynb``
-Run it for real:
-    python -m ros.arm_node --dry-run     # no hardware, integrates commands
-    python -m ros.arm_node               # real SO-101 (sole bus owner!)
+Run it for real, with its controllers:
+    python -m ros.node_supervisor --only arm --dry-run   # no hardware
+    python -m ros.node_supervisor --only arm             # real SO-101 (sole bus owner!)
 """
 
 from __future__ import annotations
@@ -38,8 +50,12 @@ import math
 import threading
 import time
 
+from so101_sim.control import TORQUE_PARAMETER, server_transport_cfg
+
 from common.config import load_config
 from common.motion import (
+    DEFAULT_CONTROL_HZ,
+    GRIPPER_TORQUE_LIMIT,
     LIVE_MIMIC_LIMITS,
     MOTOR_NAMES,
     REST_POSE,
@@ -54,7 +70,7 @@ logger = logging.getLogger(__name__)
 
 try:
     import rclpy
-    from rclpy.executors import MultiThreadedExecutor
+    from rclpy.executors import SingleThreadedExecutor
     from rclpy.node import Node
     from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
     from sensor_msgs.msg import JointState
@@ -70,14 +86,21 @@ EFFORT_SAMPLE_EVERY_N_TICKS = 3
 
 
 class So101ServerNode(Node):
-    """Bridges an ArmClient backend (real or dry-run) to ROS 2 topics."""
+    """Bridges an ArmClient backend (real or dry-run) to ros2_control's hardware topics.
+
+    An injected ``arm`` must stream: build it from
+    :func:`so101_sim.control.server_transport_cfg`.
+    """
 
     def __init__(self, cfg: dict, arm=None):
         super().__init__("so101_server_node")
+        from so101_sim.config import load_sim_config
+        from so101_sim.mapping import JointMap
+
         r = cfg["robot"]
         self.command_topic = r["command_topic"]
         self.state_topic = r["state_topic"]
-        self._control_fps = float(r.get("control_fps", 30.0))
+        self._control_fps = float(r.get("control_fps", DEFAULT_CONTROL_HZ))
         self._arm = arm if arm is not None else DryRunArm()
         # Real hardware behind this node: admit the extended live gesture-
         # mimic envelope end to end. Clients clamp every scripted behavior to
@@ -86,27 +109,30 @@ class So101ServerNode(Node):
         # keeps the base limits.
         if getattr(self._arm, "is_live", False):
             set_active_limits(LIVE_MIMIC_LIMITS)
+        sim = load_sim_config(cfg)
+        self._jmap = JointMap(sim["joint_map"], sim["gripper_map"])
+        self._current_model = sim["current_model"]
+        self._stall_nm = float(sim["current_model"]["stall_torque_nm"])
         self._lock = threading.Lock()
         self._target = dict(REST_POSE)
+        self._target_gen = 0  # bumped by a twin reset (reset_with)
         self._last_cmd_time = 0.0
-        # Direct-goal mode (config: max_relative_target: null - the pipeline's
-        # setting): each goal is one absolute write the servo profiles on its
-        # own, so the loop must write a goal only when it CHANGES. Re-writing
-        # the same goal every tick restarts the onboard profile (twitchy,
-        # stepped motion).
-        self._direct_goal = r.get("max_relative_target", 8.0) is None
-        self._last_sent_target = None
-        self._gripper_load = math.nan  # nan = feedback unavailable
+        self._gripper_nm = math.nan  # nan = feedback unavailable
         self._tick_count = 0
+        self._last_read = None  # (time, joints) of the previous tick, for velocity
         self._state_pub = None
+        self._torque_limit = None  # next gripper Torque_Limit (0-1000) to write
+        # PROVIDED: the gripper's torque limit, in N·m, as a ROS parameter.
+        self.declare_parameter(TORQUE_PARAMETER, GRIPPER_TORQUE_LIMIT / 1000.0 * self._stall_nm)
+        self.add_on_set_parameters_callback(self._on_parameters)
         self._setup_ros()
 
         self._running = True
         self._thread = threading.Thread(target=self._control_loop, daemon=True)
         self._thread.start()
         self.get_logger().info(
-            f"Ready - cmd: {self.command_topic}  state: {self.state_topic}  "
-            f"{self._control_fps:.0f} Hz"
+            f"Ready - cmd: {self.resolve_topic_name(self.command_topic)}  "
+            f"state: {self.resolve_topic_name(self.state_topic)}  {self._control_fps:.0f} Hz"
         )
 
     def _setup_ros(self) -> None:
@@ -127,16 +153,19 @@ class So101ServerNode(Node):
         # <<< TODO 2.4
 
     def _on_command(self, msg) -> None:
-        """Fold one JointState command into the target pose.
+        """Fold one JointState command (radians) into the target pose (degrees).
 
         Zip ``msg.name``/``msg.position``, keep only known motors
-        (:data:`MOTOR_NAMES` - partial commands are legal), clamp through
+        (:data:`MOTOR_NAMES` - partial commands are legal), convert each with
+        ``self._jmap.to_cal(name, radians)``, clamp through
         :func:`clamp_joints` (the safety backstop), and update the shared
         target + freshness timestamp under the lock.
         """
         # >>> TODO 2.5: So101ServerNode._on_command - notebooks/02_ros2/02_robot.ipynb
         joints = {
-            n: float(p) for n, p in zip(msg.name, msg.position) if n in MOTOR_NAMES
+            n: self._jmap.to_cal(n, float(p))
+            for n, p in zip(msg.name, msg.position)
+            if n in MOTOR_NAMES
         }
         if not joints:
             return
@@ -145,21 +174,50 @@ class So101ServerNode(Node):
             self._last_cmd_time = time.time()
         # <<< TODO 2.5
 
-    def _publish_state(self, joints: dict) -> None:
-        """Publish the arm's state, with gripper effort riding in ``effort``.
+    def _on_parameters(self, params):
+        """PROVIDED: queue a new gripper torque limit (N·m) for the control loop, the only bus thread."""
+        from rcl_interfaces.msg import SetParametersResult
+
+        for p in params:
+            if p.name != TORQUE_PARAMETER:
+                continue
+            nm = float(p.value)
+            if not 0.0 <= nm <= self._stall_nm:
+                return SetParametersResult(
+                    successful=False, reason=f"{TORQUE_PARAMETER} must be within 0..{self._stall_nm} N·m",
+                )
+            with self._lock:
+                self._torque_limit = int(round(nm / self._stall_nm * 1000.0))
+        return SetParametersResult(successful=True)
+
+    def reset_with(self, restore) -> dict:
+        """PROVIDED: run ``restore`` (a twin reset that returns the pose it
+        parked the arm at) under the lock, and make that pose the target, so
+        the control loop does not drive the arm back to the goal before it."""
+        with self._lock:
+            parked = restore()
+            self._target = dict(parked)
+            self._last_cmd_time = time.time()
+            self._target_gen += 1
+        return parked
+
+    def _publish_state(self, joints: dict, velocity) -> None:
+        """Publish the arm's state in radians, with gripper effort riding in ``effort``.
 
         Build the message with :func:`common.ros_helpers.joint_state_msg`
-        over all :data:`MOTOR_NAMES` (pass ``node=self`` for the timestamp).
-        ``effort`` must align with ``name``: the sampled gripper load at the
-        gripper's index, NaN everywhere else - NaN, not 0, is "no reading".
+        over all :data:`MOTOR_NAMES` (pass ``node=self`` for the timestamp):
+        each position through ``self._jmap.to_rad(name, degrees)``, the
+        control loop's ``velocity`` (rad/s, aligned with the names; None on
+        the first tick), and ``effort`` aligned with ``name``: the sampled
+        gripper torque ``self._gripper_nm`` at the gripper's index, NaN
+        everywhere else - NaN, not 0, is "no reading".
         """
         # >>> TODO 2.6: So101ServerNode._publish_state - notebooks/02_ros2/02_robot.ipynb
         msg = joint_state_msg(
             MOTOR_NAMES,
-            [joints.get(m, 0.0) for m in MOTOR_NAMES],
-            effort=[
-                self._gripper_load if m == "gripper" else math.nan for m in MOTOR_NAMES
-            ],
+            [self._jmap.to_rad(m, joints[m]) for m in MOTOR_NAMES],
+            velocity=velocity,
+            effort=[self._gripper_nm if m == "gripper" else math.nan for m in MOTOR_NAMES],
             node=self,
         )
         self._state_pub.publish(msg)
@@ -167,29 +225,44 @@ class So101ServerNode(Node):
 
     def _control_loop(self) -> None:
         """PROVIDED: sequential observe→act loop (one thread on the bus)."""
+        from so101_sim.servo import current_to_torque_nm
+
         interval = 1.0 / self._control_fps
         while self._running:
             t0 = time.perf_counter()
             with self._lock:
                 target = dict(self._target)
                 fresh = (time.time() - self._last_cmd_time) < 1.0
+                generation = self._target_gen
+                torque_limit, self._torque_limit = self._torque_limit, None
             try:
-                # Hold the last pose silently when commands stop. In
-                # direct-goal mode, write only when the goal changes so the
-                # servo's onboard profile runs once, uninterrupted.
-                if fresh and (
-                    not self._direct_goal or target != self._last_sent_target
-                ):
-                    self._arm.send_joints(target)
-                    self._last_sent_target = target
+                if torque_limit is not None:
+                    self._arm.set_gripper_torque_limit(torque_limit)
+                # Every fresh setpoint is written: the controllers interpolate,
+                # and the transport's per-tick clamp is the backstop. Hold the
+                # last pose silently when setpoints stop.
+                if fresh:
+                    with self._lock:
+                        fresh = generation == self._target_gen  # a twin reset replaced this target
+                    if fresh:
+                        self._arm.send_joints(target)
                 joints = self._arm.get_joints()
+                read_at = time.perf_counter()
 
                 self._tick_count += 1
                 if self._tick_count % EFFORT_SAMPLE_EVERY_N_TICKS == 0:
                     load = self._arm.get_gripper_load()
-                    self._gripper_load = math.nan if load is None else float(load)
+                    self._gripper_nm = math.nan if load is None else current_to_torque_nm(load, self._current_model)
 
-                self._publish_state(joints)
+                velocity = None
+                if self._last_read is not None:
+                    then, before = self._last_read
+                    velocity = [
+                        (self._jmap.to_rad(m, joints[m]) - self._jmap.to_rad(m, before[m])) / (read_at - then)
+                        for m in MOTOR_NAMES
+                    ]
+                self._last_read = (read_at, joints)
+                self._publish_state(joints, velocity)
             except NotImplementedError:
                 raise
             except Exception as e:  # a transient bus error must not kill the loop
@@ -214,10 +287,7 @@ def main() -> None:
         level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
     )
     if not ROS2_AVAILABLE:
-        raise SystemExit(
-            "rclpy not importable - source ROS 2 before running "
-            "(offline checks: python -m ros.selftest)"
-        )
+        raise SystemExit("rclpy not importable - source /opt/ros/jazzy/setup.bash first")
     parser = argparse.ArgumentParser(description="SO-101 server node")
     parser.add_argument("--config", default=None)
     parser.add_argument(
@@ -225,12 +295,14 @@ def main() -> None:
         action="store_true",
         help="no hardware - integrate commands in software",
     )
-    args = parser.parse_args()
+    args, ros_args = parser.parse_known_args()  # --ros-args ... (the launch's remaps) go to rclpy
 
     cfg = load_config(args.config)
-    rclpy.init()
-    node = So101ServerNode(cfg, arm=make_arm_backend(cfg, dry_run=args.dry_run))
-    executor = MultiThreadedExecutor(num_threads=2)
+    rclpy.init(args=ros_args)
+    node = So101ServerNode(cfg, arm=make_arm_backend(server_transport_cfg(cfg), dry_run=args.dry_run))
+    # One thread: rclpy's MultiThreadedExecutor rebuilds its wait set in a
+    # tight loop under the controllers' 60 Hz setpoints, starving the loop.
+    executor = SingleThreadedExecutor()
     executor.add_node(node)
     try:
         executor.spin()

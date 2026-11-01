@@ -9,7 +9,8 @@
 
 The architecture rule is *"server nodes own hardware; everything else
 subscribes."* On the rig that means one process per device: the SO-101 arm
-bus, each camera, and (optionally) the Llama intent brain. Rather than make you
+bus (with its ros2_control controllers, ``launch/so101_control.launch.py``),
+each camera, and (optionally) the Llama intent brain. Rather than make you
 open a terminal per node, the live app (and the workshop launcher) start them
 here as child processes, wait until each is actually publishing, and tear them
 all down on exit - SIGINT first so the arm parks at ``REST_POSE``.
@@ -41,6 +42,7 @@ CLI::
     python -m ros.node_supervisor --mock       # intent node uses keyword brain
     python -m ros.node_supervisor --only arm,camera_mount
     python -m ros.node_supervisor --dry-run --synthetic --mock   # laptop/CI
+    python -m ros.node_supervisor --digital-twin  # MuJoCo twin: arm + arm camera
 
 The CLI blocks until Ctrl-C (or SIGTERM), then shuts every child down cleanly.
 """
@@ -66,13 +68,14 @@ logger = logging.getLogger("ros.node_supervisor")
 PACKAGE_DIR = Path(__file__).resolve().parents[1]
 
 # Order matters: the arm parks safely and cameras are cheap; the intent node is
-# last because it may spin up llama-server.
+# last because it may spin up llama-server. The arm's controllers start right
+# after it.
 ALL_NODES = ("arm", "camera_mount", "camera_arm", "intent")
 
 
 @dataclass
 class _Child:
-    """One supervised child node process: identity, readiness topic, argv, and captured log."""
+    """One supervised child process: identity, readiness topic, ``python`` argv, and captured log."""
 
     key: str
     label: str
@@ -84,18 +87,48 @@ class _Child:
 
 
 def _node_specs(
-    cfg: dict, keys, *, dry_run: bool, synthetic: bool, mock: bool
+    cfg: dict,
+    keys,
+    *,
+    dry_run: bool,
+    synthetic: bool,
+    mock: bool,
+    sim: bool = False,
+    config_path=None,
 ) -> list[_Child]:
-    """Build the ordered :class:`_Child` specs for the requested node ``keys``."""
+    """Build the ordered :class:`_Child` specs for the requested node ``keys``.
+
+    ``sim``: the arm server is the MuJoCo digital twin (``so101_sim.node``),
+    which also publishes the arm camera rendered on its gripper - physics and
+    camera must share one process, so no separate ``camera_arm`` child.
+    The arm (or twin) runs on the hardware side's topics, and its controllers
+    (``launch/so101_control.launch.py``) start right after it.
+    """
+    import shutil
+
+    from so101_sim.control import HARDWARE_COMMANDS, HARDWARE_STATES, LAUNCH_FILE
+
     cams = cfg.get("cameras") or {}
     robot = cfg.get("robot") or {}
     intent = cfg.get("intent_node") or {}
+    cfg_file = str(config_path or PACKAGE_DIR / "config" / "workshop.yaml")
+    hardware = [
+        "--ros-args",
+        "-r", f"{robot.get('command_topic', '/so101/joint_command')}:={HARDWARE_COMMANDS}",
+        "-r", f"{robot.get('state_topic', '/so101/joint_state')}:={HARDWARE_STATES}",
+    ]
     specs: dict[str, _Child] = {
         "arm": _Child(
             key="arm",
             label="SO-101 arm server",
-            ready_topic=robot.get("state_topic", "/so101/joint_state"),
-            argv=["ros.arm_node", *(["--dry-run"] if dry_run else [])],
+            ready_topic=HARDWARE_STATES,
+            argv=["-m", "ros.arm_node", *(["--dry-run"] if dry_run else []), "--config", cfg_file, *hardware],
+        ),
+        "controllers": _Child(
+            key="controllers",
+            label="SO-101 controllers (ros2_control)",
+            ready_topic="/joint_states",
+            argv=[shutil.which("ros2") or "ros2", "launch", str(LAUNCH_FILE), f"config:={cfg_file}", "stack:=workshop"],
         ),
         "camera_mount": _Child(
             key="camera_mount",
@@ -104,6 +137,7 @@ def _node_specs(
                 "topic", "/cameras/mount/image_raw"
             ),
             argv=[
+                "-m",
                 "ros.camera_node",
                 "--role",
                 "mount",
@@ -115,6 +149,7 @@ def _node_specs(
             label="arm camera",
             ready_topic=(cams.get("arm") or {}).get("topic", "/cameras/arm/image_raw"),
             argv=[
+                "-m",
                 "ros.camera_node",
                 "--role",
                 "arm",
@@ -125,9 +160,23 @@ def _node_specs(
             key="intent",
             label="Llama intent node",
             ready_topic=intent.get("intent_topic", "/vla/intent"),
-            argv=["ros.intent_node", *(["--mock"] if mock else [])],
+            argv=["-m", "ros.intent_node", *(["--mock"] if mock else [])],
         ),
     }
+    keys = list(keys)
+    if sim:
+        specs["arm"] = _Child(
+            key="arm",
+            label="SO-101 digital twin (arm + arm camera)",
+            ready_topic=HARDWARE_STATES,
+            argv=["-m", "so101_sim.node", "--config", cfg_file, "--stack", "workshop",
+                  "--sim-cameras", "arm", *hardware],
+        )
+        keys = [k for k in keys if k != "camera_arm"]
+        if "arm" not in keys and "camera_arm" in keys:
+            keys = ["arm", *keys]
+    if "arm" in keys:
+        keys.insert(keys.index("arm") + 1, "controllers")
     return [specs[k] for k in keys if k in specs]
 
 
@@ -142,12 +191,20 @@ class NodeSupervisor:
         dry_run: bool = False,
         synthetic: bool = False,
         mock: bool = False,
+        sim: bool = False,
+        config_path=None,
         ready_timeout_s: float = 20.0,
     ):
         self.cfg = cfg
         self.ready_timeout_s = float(ready_timeout_s)
         self._children = _node_specs(
-            cfg, nodes, dry_run=dry_run, synthetic=synthetic, mock=mock
+            cfg,
+            nodes,
+            dry_run=dry_run,
+            synthetic=synthetic,
+            mock=mock,
+            sim=sim,
+            config_path=config_path,
         )
         self._probe = None  # lazily-created rclpy probe node
         self._stopped = False
@@ -190,14 +247,18 @@ class NodeSupervisor:
 
     # -- process plumbing -----------------------------------------------------
     def _spawn(self, child: _Child) -> None:
-        """Launch ``child`` as a ``python -m`` subprocess and start draining its output."""
+        """Launch ``child`` as a ``python`` subprocess and start draining its output.
+
+        It gets SIGINT when this process exits, however it exits (the ``atexit``
+        hook below covers only a clean exit), so the arm still parks.
+        """
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join(
             [str(PACKAGE_DIR), env.get("PYTHONPATH", "")]
         ).rstrip(os.pathsep)
         env.setdefault("PYTHONUNBUFFERED", "1")
         child.proc = subprocess.Popen(
-            [sys.executable, "-m", *child.argv],
+            [sys.executable, "-m", "so101_sim.parent_death", sys.executable, *child.argv],
             cwd=str(PACKAGE_DIR),
             env=env,
             stdout=subprocess.PIPE,
@@ -236,7 +297,7 @@ class NodeSupervisor:
                 continue
             print(
                 f"nodes: starting {child.label} "
-                f"({' '.join(['python', '-m', *child.argv])})"
+                f"({' '.join(['python', *child.argv])})"
             )
             self._spawn(child)
             started.append(child)
@@ -262,7 +323,9 @@ class NodeSupervisor:
         return self
 
     def stop(self) -> None:
-        """SIGINT every child (so the arm parks), then wait for and reap them all."""
+        """SIGINT every child's process group (so the arm parks), then wait for
+        and reap them all. A child is a group of its own: a launch's nodes get
+        the signal too, and a launch killed late takes its nodes with it."""
         if self._stopped:
             return
         self._stopped = True
@@ -271,7 +334,7 @@ class NodeSupervisor:
             if proc is None or proc.poll() is not None:
                 continue
             try:  # SIGINT → arm parks at REST
-                proc.send_signal(signal.SIGINT)
+                os.killpg(proc.pid, signal.SIGINT)
             except Exception:
                 pass
         deadline = time.time() + 5.0
@@ -283,7 +346,8 @@ class NodeSupervisor:
                 proc.wait(timeout=max(0.0, deadline - time.time()))
             except Exception:
                 try:
-                    proc.kill()
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait()
                 except Exception:
                     pass
         if self._probe is not None:
@@ -309,6 +373,9 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="arm node: no hardware")
     ap.add_argument("--synthetic", action="store_true", help="camera nodes: no device")
     ap.add_argument("--mock", action="store_true", help="intent node: keyword brain")
+    ap.add_argument(
+        "--digital-twin", action="store_true", help="arm + arm camera: MuJoCo digital twin"
+    )
     ap.add_argument("--ready-timeout", type=float, default=20.0)
     args = ap.parse_args()
 
@@ -336,6 +403,8 @@ def main() -> int:
         dry_run=args.dry_run,
         synthetic=args.synthetic,
         mock=args.mock,
+        sim=args.digital_twin,
+        config_path=args.config,
         ready_timeout_s=args.ready_timeout,
     )
     try:

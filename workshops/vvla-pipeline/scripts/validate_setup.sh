@@ -131,6 +131,22 @@ assert "VitisAIExecutionProvider" in ort.get_available_providers()
 PY
 ' bash "$SDK_ROOT"
 
+run_check "ROS 2 Jazzy, ros2_control and the topic bridge are installed" bash -c '
+  set -euo pipefail
+  root="$1"
+  [[ -f /opt/ros/jazzy/setup.bash ]] || { echo "ROS 2 Jazzy is not at /opt/ros/jazzy (bootstrap section 1d)" >&2; exit 1; }
+  set +u
+  # shellcheck disable=SC1091
+  source /opt/ros/jazzy/setup.bash
+  set -u
+  for pkg in controller_manager joint_trajectory_controller forward_command_controller \
+      joint_state_broadcaster robot_state_publisher xacro; do
+    ros2 pkg prefix "$pkg" >/dev/null || { echo "missing ROS 2 package: $pkg" >&2; exit 1; }
+  done
+  bridge="$root/ros_ws/install/topic_based_ros2_control"
+  [[ -d "$bridge" ]] || { echo "$bridge is missing (bootstrap section 4e builds it)" >&2; exit 1; }
+' bash "$REPO_ROOT"
+
 if [[ "$FULL" -eq 1 ]]; then
   note "repeating bootstrap (apt, llama, model downloads, and compile skipped)"
   run_check "repeat bootstrap preserves the deployment environment" bash -c '

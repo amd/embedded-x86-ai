@@ -31,6 +31,8 @@ def hush_benign_warnings() -> None:
     os.environ.setdefault("EGL_LOG_LEVEL", "fatal")
     # Dual matplotlib installs (system + pip) trip this harmless warning.
     warnings.filterwarnings("ignore", message="Unable to import Axes3D")
+    # webrtcvad still imports pkg_resources; setuptools warns on that import.
+    warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
     # onnxruntime: ERROR+ only - "some nodes on CPU" is expected when the
     # VitisAI EP partitions a graph.
     try:

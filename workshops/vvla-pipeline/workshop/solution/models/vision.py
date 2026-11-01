@@ -31,6 +31,35 @@ from models.npu import build_npu_session, report_placement
 
 logger = logging.getLogger(__name__)
 
+_npu_sized = False
+_npu_sizer = None  # holds the NPU buffers for the life of the process
+
+
+def size_npu(cfg: dict, device=None) -> None:
+    """Open the larger YOLO model the config puts on the NPU and keep it
+    open, once per process, before any other NPU session.
+
+    The models on the NPU share buffers within a process, created by its
+    first NPU session and freed when the last one closes: YOLO-pose opened
+    while the detector is open fails with ``HW context creation
+    unsuccessful`` (``sub buffer size and offset``). Sized by YOLO-pose,
+    both fit, in either order.
+    """
+    global _npu_sized, _npu_sizer
+    if _npu_sized:
+        return
+    for section in ("yolo_pose", "yolo_detect"):  # largest buffers first
+        y = cfg[section]
+        if (device or y["device"]) == "npu":
+            _npu_sized = True
+            _npu_sizer = build_npu_session(
+                y["onnx"], "npu",
+                vitisai_config=y.get("vitisai_config", "config/vaiep_config.json"),
+                cache_dir=cfg.get("system", {}).get("cache_dir", "../../cache"),
+                cache_key=y["cache_key"],
+            )
+            return
+
 
 class PoseEstimator:
     """YOLOv26s-pose (end-to-end head [1, 300, 57], no NMS) on NPU or CPU."""
@@ -41,6 +70,7 @@ class PoseEstimator:
         self.conf_threshold = float(y["conf_threshold"])
         self.kpt_threshold = float(y["kpt_threshold"])
         requested = device or y["device"]
+        size_npu(cfg, device)
         self.session = build_npu_session(
             y["onnx"], requested,
             vitisai_config=y.get("vitisai_config", "config/vaiep_config.json"),
@@ -80,8 +110,8 @@ class ObjectDetector:
     def __init__(self, cfg: dict, device=None):
         y = cfg["yolo_detect"]
         self.imgsz = int(y["imgsz"])
-        self.conf_threshold = float(y["conf_threshold"])
         requested = device or y["device"]
+        size_npu(cfg, device)
         self.session = build_npu_session(
             y["onnx"], requested,
             vitisai_config=y.get("vitisai_config", "config/vaiep_config.json"),
@@ -89,6 +119,10 @@ class ObjectDetector:
             cache_key=y["cache_key"],
         )
         self.provider = report_placement(self.session, requested, "yolo26s-detect")
+        on_npu = "VitisAIExecutionProvider" in self.session.get_providers()
+        self.conf_threshold = float(
+            y.get("npu_conf_threshold", y["conf_threshold"]) if on_npu else y["conf_threshold"]
+        )
         self.input_name = self.session.get_inputs()[0].name
 
     def infer(self, frame_bgr, conf=None):

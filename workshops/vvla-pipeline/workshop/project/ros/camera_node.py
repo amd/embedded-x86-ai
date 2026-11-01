@@ -215,10 +215,11 @@ def main() -> None:
         level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
     )
     if not ROS2_AVAILABLE:
-        raise SystemExit(
-            "rclpy not importable - source ROS 2 before running "
-            "(offline checks: python -m ros.selftest)"
-        )
+        raise SystemExit("rclpy not importable - source /opt/ros/jazzy/setup.bash first")
+    from rclpy.executors import SingleThreadedExecutor
+
+    from so101_sim.spin import spin_until_shutdown
+
     parser = argparse.ArgumentParser(description="Camera publisher node")
     parser.add_argument("--role", choices=["mount", "arm"], required=True)
     parser.add_argument("--config", default=None)
@@ -239,10 +240,10 @@ def main() -> None:
         )
     rclpy.init(args=ros_args)
     node = CameraNode(args.role, defaults, frame_source=source)
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+        spin_until_shutdown(executor)
     finally:
         node.destroy_node()
         try:

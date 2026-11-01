@@ -16,9 +16,9 @@ if output exists).
     python scripts/export_yolo26s_detect.py [--out models/yolo26s]
 
 Downloads ``yolo26s.pt`` via ultralytics if needed, exports a static batch-1
-640×640 ONNX (opset 17, simplified), and validates the graph. YOLO26's
-end-to-end head exports as [1, 300, 6] (xyxy, score, class) - no NMS pass at
-inference time. The VitisAI EP converts FP32→BF16 at NPU compile time (see
+640×640 ONNX (opset 17, simplified), and validates the graph. ``nms`` is left
+unset, so the file is the one-to-many head [1, 84, 8400] and this process runs
+NMS. The VitisAI EP converts FP32→BF16 at NPU compile time (see
 config/vaiep_config.json); first compile is slow, cached under
 ``cache/yolo26s_detect_fp32`` (config ``yolo_detect.cache_key``).
 """
@@ -44,8 +44,9 @@ def export_to_onnx(pt_path: Path, onnx_path: Path) -> None:
 
     print(f"Exporting {pt_path} to ONNX FP32...")
     model = YOLO(str(pt_path))
-    # nms must be False, not omitted. Ultralytics sets end2end = (nms is False);
-    # the default None exports the raw [1, 84, 8400] head instead of [1, 300, 6].
+    # Leave nms unset. Ultralytics sets end2end = (nms is False), so False exports
+    # the one-to-one head ([1, 300, 6]) whose class scores fall under the 0.2 cutoff.
+    # Unset exports the one-to-many head ([1, 84, 8400]); nms_keep runs NMS here.
     model.export(
         format="onnx",
         imgsz=IMG_SIZE,
@@ -53,7 +54,6 @@ def export_to_onnx(pt_path: Path, onnx_path: Path) -> None:
         simplify=True,
         dynamic=False,
         batch=1,
-        nms=False,
     )
     default_name = Path(str(pt_path).replace(".pt", ".onnx"))
     if default_name.exists():

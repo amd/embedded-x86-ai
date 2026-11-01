@@ -29,6 +29,7 @@ never as an automatic fallback:
     python app.py --synthetic            # explicitly skip the camera/hands
     python app.py --dry-run --synthetic --no-llm     # laptop mode, everything faked
     python app.py --dry-run --synthetic --headless --frames 60   # CI-style check
+    python app.py --digital-twin         # no robot hardware: MuJoCo twin of the arm
 
 The app also brings up the ROS 2 server nodes it needs (the arm + mount-camera
 publishers) as child processes and tears them down on exit - so you don't need
@@ -100,7 +101,9 @@ def _start_nodes(cfg, args):
     from ros.node_supervisor import NodeSupervisor
 
     print("-- starting ROS 2 server nodes --")
-    sup = NodeSupervisor(cfg, wanted)
+    sup = NodeSupervisor(
+        cfg, wanted, sim=args.digital_twin and not args.dry_run, config_path=args.config
+    )
     try:
         sup.start()
     except Exception as e:
@@ -132,21 +135,24 @@ def _build_arm(cfg, args):
             from ros.arm_client import Ros2ArmClient
 
             arm = Ros2ArmClient(cfg)
-            print("arm: ROS 2 client → " + cfg["robot"]["command_topic"])
+            print("arm: ROS 2 client → the ros2_control controllers")
             return arm
         except Exception as e:
             _die(
                 "arm",
                 f"ROS 2 client would not come up ({e}).",
-                "Is the arm server node running? "
-                "python -m ros.arm_node   (add --dry-run to simulate the arm).",
+                "Are the arm server node and its controllers running? "
+                "python -m ros.node_supervisor --only arm   (add --dry-run to simulate the arm).",
             )
     else:
         try:
-            from common.motion import make_arm_backend
+            from common.motion import bus_owner, make_arm_backend
 
-            arm = make_arm_backend(cfg)
-            print("arm: direct serial (sole bus owner!)")
+            arm = bus_owner(make_arm_backend(cfg), cfg)
+            if args.digital_twin:
+                print("arm: MuJoCo digital twin (in-process)")
+            else:
+                print("arm: direct serial (sole bus owner!)")
             return arm
         except Exception as e:
             _die(
@@ -282,6 +288,8 @@ def _mode_label(args) -> str:
         flags.append("--no-llm")
     if args.no_nodes:
         flags.append("--no-nodes")
+    if args.digital_twin:
+        flags.append("--digital-twin")
     if args.headless:
         flags.append("--headless")
     if args.frames:
@@ -373,7 +381,7 @@ def _preflight(cfg, args) -> bool:
     print("Check your progress without the rig:")
     print("    python selftest.py                 # whole suite + solution parity")
     print("    python -m models.selftest          # component 1 only")
-    print("    python -m ros.selftest --fake      # component 2 (no ROS 2 needed)")
+    print("    python -m ros.selftest             # component 2 (over ROS 2)")
     print("    python -m integration.selftest     # component 3 only")
     print("\nOr shrink what THIS run needs with the laptop/CI flags:")
     print("    python app.py --dry-run --synthetic --no-llm")
@@ -397,6 +405,11 @@ def main() -> int:
     )
     ap.add_argument("--headless", action="store_true", help="no preview window")
     ap.add_argument(
+        "--digital-twin",
+        action="store_true",
+        help="drive the MuJoCo digital twin (arm + arm camera) instead of the rig",
+    )
+    ap.add_argument(
         "--frames",
         type=int,
         default=0,
@@ -418,6 +431,9 @@ def main() -> int:
     from common.config import PROJECT_ROOT, load_config
 
     cfg = load_config(args.config)
+    if args.digital_twin:
+        cfg.setdefault("robot", {})["backend"] = "sim"
+        cfg.setdefault("cameras", {}).setdefault("arm", {})["source"] = "sim"
 
     # Fail-soft on unfinished work: list the TODOs this run needs instead of
     # crashing on the first stub. Heavy imports come AFTER this, so a fresh
@@ -484,15 +500,16 @@ def main() -> int:
 
         Behaviors run on the MAIN thread (cv2 previews want that), so while
         one is running the dispatch loop below is blocked - a typed 'stop'
-        must therefore interrupt from HERE, by setting the shared stop event
-        every behavior's stop_check polls. Everything else is queued for
+        must therefore interrupt from HERE, with ctx.request_stop(): it sets
+        the stop event every behavior's stop_check polls, and a command whose
+        parse is still running does not start. Everything else is queued for
         dispatch once the current behavior yields.
         """
         while True:
             try:
                 line = input()
             except EOFError:
-                ctx.stop_event.set()  # end any running behavior
+                ctx.request_stop()  # end any running behavior
                 commands.put("__quit__")
                 return
             line = line.strip()
@@ -500,10 +517,10 @@ def main() -> int:
                 continue
             if is_stop(line):  # safety stop: interrupt NOW
                 ctx.say("Stopping.")
-                ctx.stop_event.set()
+                ctx.request_stop()
                 continue
             if line.lower() in ("quit", "exit"):
-                ctx.stop_event.set()  # stop the behavior, then exit
+                ctx.request_stop()  # stop the behavior, then exit
                 commands.put("__quit__")
                 return
             commands.put(line)
@@ -533,6 +550,7 @@ def main() -> int:
             # A behavior (or the gauntlet itself) isn't implemented yet - say so
             # and keep the UI alive instead of dropping a traceback mid-session.
             ctx.say(f"(not wired up yet: {e})")
+        logger.info("=== %r handled ===", text)
         # Seamless switching: drain queued commands except the newest, so a
         # backlog typed during a behavior doesn't replay stale ones.
         newest = None

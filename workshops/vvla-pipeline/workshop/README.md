@@ -17,7 +17,8 @@ runs on the CPU.
 notebooks/               phase 1 - read & run these first (each is self-contained)
   01_ai_models/          NPU session factory - MediaPipe on CPU - Llama on iGPU
   02_ros2/               camera nodes/clients - SO-101 server/client - Llama intent node
-  03_integration/        registry dispatch - the mimic composition - the live UI
+  03_integration/        registry dispatch - the mimic composition - the live UI -
+                         the digital twin (MuJoCo arm, cameras, grasp; live console over ROS 2)
 common/                  PROVIDED helpers (imaging, motion, ROS codecs, fixtures,
                          reporting, resource HUD) - one shared copy, imported below
 project/                 phase 2 - prebuilt project with 21 TODO stubs you implement
@@ -48,7 +49,7 @@ cd workshop
 Jupyter opens `notebooks/`. Read and run them in order: `01_ai_models`,
 `02_ros2`, `03_integration`.
 
-The `02_ros2` notebooks import `rclpy`. `bootstrap.sh` installs ROS 2 Jazzy and creates `.venv` with `--system-site-packages`. `./run_notebooks.sh` sources `/opt/ros/jazzy/setup.bash` before Jupyter starts.
+The `02_ros2` notebooks and section 5 of `03_integration/02_digital_twin.ipynb` import `rclpy`. `bootstrap.sh` installs ROS 2 Jazzy and creates `.venv` with `--system-site-packages`. `./run_notebooks.sh` sources `/opt/ros/jazzy/setup.bash` before Jupyter starts.
 
 After the notebooks, the TODOs are in `project/`. Follow [project/README.md](project/README.md).
 
@@ -80,6 +81,10 @@ diff -r project solution                  # exactly the 21 TODO bodies, nothing 
 cd solution && python -m models.selftest && python -m ros.selftest \
   && python app.py --dry-run --synthetic --no-llm --headless --frames 60
 ```
+
+`./run_notebooks.sh --test` runs every notebook and the commands above
+headless, after the same setup as the happy path. See
+[Automated tests](../README.md#automated-tests).
 
 AMD-specific lessons for the session:
 

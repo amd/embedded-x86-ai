@@ -1,0 +1,84 @@
+--- a/include/topic_based_ros2_control/topic_based_system.hpp
++++ b/include/topic_based_ros2_control/topic_based_system.hpp
+@@ -45,6 +45,7 @@
+ #include <rclcpp/node.hpp>
+ #include <rclcpp/publisher.hpp>
+ #include <rclcpp/subscription.hpp>
++#include <rclcpp/time.hpp>
+ 
+ #include <sensor_msgs/msg/joint_state.hpp>
+ 
+@@ -76,6 +77,11 @@
+   std::string joint_states_topic_;
+   // > 0: on activation, wait this long for the first joint state and start the commands there
+   double initial_state_timeout_{ 0.0 };
++  // > 0: read() fails once the newest joint state is older than this, so a dead
++  // arm server is not republished as a live state. 0 keeps the upstream behavior.
++  double joint_state_timeout_{ 0.0 };
++  rclcpp::Time last_joint_state_time_{ 0, 0, RCL_ROS_TIME };
++  bool joint_state_is_stale_{ false };
+ 
+   /// Use standard interfaces for joints because they are relevant for dynamic behavior
+   std::array<std::string, 4> standard_interfaces_ = { hardware_interface::HW_IF_POSITION,
+--- a/src/topic_based_system.cpp
++++ b/src/topic_based_system.cpp
+@@ -38,6 +38,7 @@
+ 
+ #include <angles/angles.h>
+ #include <rclcpp/executors.hpp>
++#include <rclcpp/time.hpp>
+ #include <rclcpp/wait_for_message.hpp>
+ #include <topic_based_ros2_control/topic_based_system.hpp>
+ 
+@@ -148,13 +149,17 @@
+   }
+ 
+   initial_state_timeout_ = std::stod(get_hardware_parameter("initial_state_timeout", "0.0"));
++  joint_state_timeout_ = std::stod(get_hardware_parameter("joint_state_timeout", "0.0"));
+   joint_states_topic_ = get_hardware_parameter("joint_states_topic", "/robot_joint_states");
+ 
+   topic_based_joint_commands_publisher_ = node_->create_publisher<sensor_msgs::msg::JointState>(
+       get_hardware_parameter("joint_commands_topic", "/robot_joint_commands"), rclcpp::QoS(1));
+   topic_based_joint_states_subscriber_ = node_->create_subscription<sensor_msgs::msg::JointState>(
+       joint_states_topic_, rclcpp::SensorDataQoS(),
+-      [this](const sensor_msgs::msg::JointState::SharedPtr joint_state) { latest_joint_state_ = *joint_state; });
++      [this](const sensor_msgs::msg::JointState::SharedPtr joint_state) {
++        latest_joint_state_ = *joint_state;
++        last_joint_state_time_ = node_->now();
++      });
+ 
+   // if the values on the `joint_states_topic` are wrapped between -2*pi and 2*pi (like they are in Isaac Sim)
+   // sum the total joint rotation returned on the `joint_states_` interface
+@@ -183,6 +188,7 @@
+     return CallbackReturn::ERROR;
+   }
+   latest_joint_state_ = first;
++  last_joint_state_time_ = node_->now();
+   read(node_->now(), rclcpp::Duration(0, 0));
+   joint_commands_[POSITION_INTERFACE_INDEX] = joint_states_[POSITION_INTERFACE_INDEX];
+   return CallbackReturn::SUCCESS;
+@@ -236,6 +242,24 @@
+     rclcpp::spin_some(node_);
+   }
+ 
++  if (joint_state_timeout_ > 0.0)
++  {
++    const bool never_received = last_joint_state_time_.nanoseconds() == 0;
++    const double age_s = never_received ? joint_state_timeout_ + 1.0 : (node_->now() - last_joint_state_time_).seconds();
++    if (never_received || age_s > joint_state_timeout_)
++    {
++      if (!joint_state_is_stale_)
++      {
++        RCLCPP_ERROR(node_->get_logger(),
++                     "No joint state on '%s' for %.3f s (limit %.3f s); the arm server's state is stale",
++                     joint_states_topic_.c_str(), age_s, joint_state_timeout_);
++        joint_state_is_stale_ = true;
++      }
++      return hardware_interface::return_type::ERROR;
++    }
++    joint_state_is_stale_ = false;
++  }
++
+   for (std::size_t i = 0; i < latest_joint_state_.name.size(); ++i)
+   {
+     const auto& joints = info_.joints;

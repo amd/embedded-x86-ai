@@ -1,0 +1,90 @@
+diff --git a/include/topic_based_ros2_control/topic_based_system.hpp b/include/topic_based_ros2_control/topic_based_system.hpp
+index cf67d61..9daa6d0 100644
+--- a/include/topic_based_ros2_control/topic_based_system.hpp
++++ b/include/topic_based_ros2_control/topic_based_system.hpp
+@@ -57,6 +57,8 @@ class TopicBasedSystem : public hardware_interface::SystemInterface
+ public:
+   CallbackReturn on_init(const hardware_interface::HardwareInfo& info) override;
+ 
++  CallbackReturn on_activate(const rclcpp_lifecycle::State& previous_state) override;
++
+   std::vector<hardware_interface::StateInterface> export_state_interfaces() override;
+ 
+   std::vector<hardware_interface::CommandInterface> export_command_interfaces() override;
+@@ -71,6 +73,9 @@ private:
+   rclcpp::Node::SharedPtr node_;
+   sensor_msgs::msg::JointState latest_joint_state_;
+   bool sum_wrapped_joint_states_{ false };
++  std::string joint_states_topic_;
++  // > 0: on activation, wait this long for the first joint state and start the commands there
++  double initial_state_timeout_{ 0.0 };
+ 
+   /// Use standard interfaces for joints because they are relevant for dynamic behavior
+   std::array<std::string, 4> standard_interfaces_ = { hardware_interface::HW_IF_POSITION,
+diff --git a/src/topic_based_system.cpp b/src/topic_based_system.cpp
+index 67a9ec9..3778a4a 100644
+--- a/src/topic_based_system.cpp
++++ b/src/topic_based_system.cpp
+@@ -28,6 +28,7 @@
+ 
+ /* Author: Jafar Abdi */
+ #include <algorithm>
++#include <chrono>
+ #include <cmath>
+ #include <iterator>
+ #include <limits>
+@@ -37,6 +38,7 @@
+ 
+ #include <angles/angles.h>
+ #include <rclcpp/executors.hpp>
++#include <rclcpp/wait_for_message.hpp>
+ #include <topic_based_ros2_control/topic_based_system.hpp>
+ 
+ namespace
+@@ -145,10 +147,13 @@ CallbackReturn TopicBasedSystem::on_init(const hardware_interface::HardwareInfo&
+     trigger_joint_command_threshold_ = std::stod(it->second);
+   }
+ 
++  initial_state_timeout_ = std::stod(get_hardware_parameter("initial_state_timeout", "0.0"));
++  joint_states_topic_ = get_hardware_parameter("joint_states_topic", "/robot_joint_states");
++
+   topic_based_joint_commands_publisher_ = node_->create_publisher<sensor_msgs::msg::JointState>(
+       get_hardware_parameter("joint_commands_topic", "/robot_joint_commands"), rclcpp::QoS(1));
+   topic_based_joint_states_subscriber_ = node_->create_subscription<sensor_msgs::msg::JointState>(
+-      get_hardware_parameter("joint_states_topic", "/robot_joint_states"), rclcpp::SensorDataQoS(),
++      joint_states_topic_, rclcpp::SensorDataQoS(),
+       [this](const sensor_msgs::msg::JointState::SharedPtr joint_state) { latest_joint_state_ = *joint_state; });
+ 
+   // if the values on the `joint_states_topic` are wrapped between -2*pi and 2*pi (like they are in Isaac Sim)
+@@ -161,6 +166,28 @@ CallbackReturn TopicBasedSystem::on_init(const hardware_interface::HardwareInfo&
+   return CallbackReturn::SUCCESS;
+ }
+ 
++CallbackReturn TopicBasedSystem::on_activate(const rclcpp_lifecycle::State& /*previous_state*/)
++{
++  // write() publishes the commands from now on, and until a controller writes
++  // them they hold their initial values: start them at the measured state.
++  if (initial_state_timeout_ <= 0.0)
++  {
++    return CallbackReturn::SUCCESS;
++  }
++  sensor_msgs::msg::JointState first;
++  if (!rclcpp::wait_for_message(first, node_, joint_states_topic_, std::chrono::duration<double>(initial_state_timeout_),
++                                rclcpp::SensorDataQoS()))
++  {
++    RCLCPP_ERROR(node_->get_logger(), "No joint state on '%s' within %.1f s", joint_states_topic_.c_str(),
++                 initial_state_timeout_);
++    return CallbackReturn::ERROR;
++  }
++  latest_joint_state_ = first;
++  read(node_->now(), rclcpp::Duration(0, 0));
++  joint_commands_[POSITION_INTERFACE_INDEX] = joint_states_[POSITION_INTERFACE_INDEX];
++  return CallbackReturn::SUCCESS;
++}
++
+ std::vector<hardware_interface::StateInterface> TopicBasedSystem::export_state_interfaces()
+ {
+   std::vector<hardware_interface::StateInterface> state_interfaces;
+-- 
+2.43.0
+

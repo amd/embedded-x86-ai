@@ -30,8 +30,7 @@ from vla_pipeline.utils.config import load_config
 
 logger = logging.getLogger(__name__)
 
-# Each move is a list of joint keyframes (degrees); one keyframe per beat.
-MOVES: dict[str, list[dict[str, float]]] = {
+DANCE_MOVES = {
     "sway": [
         {
             "shoulder_pan": -45.0,
@@ -47,7 +46,9 @@ MOVES: dict[str, list[dict[str, float]]] = {
         },
     ],
     "pump": [
-        {"shoulder_lift": -90.0, "elbow_flex": 95.0, "wrist_flex": 60.0},
+        # Folded any tighter (elbow 95, wrist 60) the wrist camera mount hits
+        # the shoulder and the jaws the table, and the servos trip on overload.
+        {"shoulder_lift": -90.0, "elbow_flex": 80.0, "wrist_flex": 50.0},
         {"shoulder_lift": -20.0, "elbow_flex": 20.0, "wrist_flex": -20.0},
     ],
     "disco_point": [
@@ -75,6 +76,7 @@ MOVES: dict[str, list[dict[str, float]]] = {
 }
 
 
+
 def run_dance(
     cfg: dict,
     arm: ArmClient,
@@ -90,7 +92,7 @@ def run_dance(
     rng = random.Random(seed)
 
     logger.info("Dancing for %.0f s at %.0f BPM", duration_s, bpm)
-    order = list(MOVES)
+    order = list(DANCE_MOVES)
     rng.shuffle(order)
     move_cycle = itertools.cycle(order)
 
@@ -102,15 +104,18 @@ def run_dance(
             move = next(move_cycle)
             logger.info("[dance] move: %s", move)
             # Two bars of the move (4 beats each keyframe alternation).
-            for keyframe in MOVES[move] * 4:
+            for keyframe in DANCE_MOVES[move] * 4:
                 if time.time() >= deadline or (stop_check and stop_check()):
                     break
-                arm.go_to(keyframe, duration_s=beat * 0.9, fps=30.0)
+                arm.go_to(keyframe, duration_s=beat * 0.9, fps=30.0, stop_check=stop_check)
     except KeyboardInterrupt:
         pass
     finally:
-        logger.info("Dance over - bowing out to rest pose.")
-        arm.go_to_rest()
+        if stop_check and stop_check():
+            logger.info("Dance stopped - holding position.")
+        else:
+            logger.info("Dance over - bowing out to rest pose.")
+            arm.go_to_rest(stop_check=stop_check)
 
 
 # =============================================================================

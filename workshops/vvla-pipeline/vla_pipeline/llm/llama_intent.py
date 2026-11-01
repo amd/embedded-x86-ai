@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
 
 import requests
@@ -39,6 +40,9 @@ from vla_pipeline.llm.intents import INTENT_SYSTEM_PROMPT, Intent, ParsedCommand
 from vla_pipeline.utils.config import load_config, resolve
 
 logger = logging.getLogger(__name__)
+
+# What llama-server logs once its model is loaded and it serves requests.
+READY_LINE = "listening on http://"
 
 
 class LlamaIntentParser:
@@ -77,7 +81,8 @@ class LlamaIntentParser:
             return False
 
     def _spawn_server(self, ready_timeout_s: float = 120.0) -> None:
-        """Launch llama-server as a subprocess and block until it reports healthy."""
+        """Launch llama-server as a subprocess and block until it logs that it
+        is listening (:data:`READY_LINE`), or exits."""
         server_bin = resolve(self._cfg["server_bin"])
         model = resolve(self._cfg["model_gguf"])
         if not server_bin.exists():
@@ -105,6 +110,10 @@ class LlamaIntentParser:
         ]
         if self._cfg.get("no_warmup", False):
             cmd.append("--no-warmup")
+        # Smaller compute ubatches keep each GPU submission short, so a 3-D
+        # render pass sharing the iGPU waits less behind prompt processing.
+        if self._cfg.get("ubatch_size"):
+            cmd += ["--ubatch-size", str(int(self._cfg["ubatch_size"]))]
         cmd += list(self._cfg.get("extra_args", []) or [])
 
         # Deterministic GPU init on Strix Halo (gfx1151): the ROCm runtime can
@@ -114,6 +123,10 @@ class LlamaIntentParser:
         gfx = self._cfg.get("hsa_override_gfx_version", "11.5.1")
         if gfx:
             env.setdefault("HSA_OVERRIDE_GFX_VERSION", str(gfx))
+        # Optional compute-unit fence (e.g. "0:0-31" leaves 8 of 40 CUs to the
+        # graphics queue). Off by default: measure with so101_sim.bench first.
+        if self._cfg.get("cu_mask"):
+            env["HSA_CU_MASK"] = str(self._cfg["cu_mask"])
 
         logger.info("Starting llama-server (ROCm): %s", " ".join(cmd))
         log_dir = resolve(self._log_dir)
@@ -121,22 +134,39 @@ class LlamaIntentParser:
         self._server_log_path = log_dir / "llama-server.log"
         self._server_log = open(self._server_log_path, "w")
         self._proc = subprocess.Popen(
-            cmd, stdout=self._server_log, stderr=subprocess.STDOUT, env=env
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, text=True, errors="replace",
         )
-        deadline = time.time() + ready_timeout_s
-        while time.time() < deadline:
-            if self._server_alive():
-                logger.info("llama-server ready at %s", self.base)
-                return
+        ready = threading.Event()
+
+        def relay() -> None:
+            """The server's output to its log; its readiness line, or its exit, sets ``ready``."""
+            for line in self._proc.stdout:
+                self._server_log.write(line)
+                self._server_log.flush()
+                if READY_LINE in line:
+                    ready.set()
+            ready.set()
+
+        threading.Thread(target=relay, daemon=True, name="llama-server-log").start()
+        try:
+            if not ready.wait(ready_timeout_s):
+                raise TimeoutError(
+                    f"llama-server did not log {READY_LINE!r} within {ready_timeout_s:.0f} s "
+                    f"(log: {self._server_log_path})"
+                )
             if self._proc.poll() is not None:
                 tail = self._read_server_log_tail()
                 raise RuntimeError(
-                    f"llama-server exited with code {self._proc.returncode} during "
+                    f"llama-server exited with code {self._proc.wait()} during "
                     f"startup. Last log lines:\n{tail}\n"
                     f"(full log: {self._server_log_path})"
                 )
-            time.sleep(0.5)
-        raise TimeoutError("llama-server did not become healthy in time.")
+            if not self._server_alive():
+                raise RuntimeError(f"llama-server logged readiness but {self.base}/health is not ready")
+        except BaseException:
+            self.close()
+            raise
+        logger.info("llama-server ready at %s", self.base)
 
     def _read_server_log_tail(self, n: int = 20) -> str:
         """Return the last n lines of the server log, for error messages."""
@@ -155,6 +185,9 @@ class LlamaIntentParser:
             except subprocess.TimeoutExpired:
                 self._proc.kill()
             self._proc = None
+        server_log = getattr(self, "_server_log", None)
+        if server_log is not None and not server_log.closed:
+            server_log.close()
 
     # ------------------------------------------------------------------
     # Intent parsing
@@ -214,6 +247,9 @@ _SELFTEST_CASES = [
     ("grab the bottle and hand it to me", Intent.PICK_PLACE, "bottle"),
     ("show me your best dance moves", Intent.DANCE, None),
     ("hold this pencil for me", Intent.GRIP, None),
+    ("release", Intent.RELEASE, None),
+    ("open your hand", Intent.RELEASE, None),
+    ("drop it", Intent.RELEASE, None),
     ("wave hello", Intent.WAVE, None),
     ("go back to your home position", Intent.HOME, None),
     ("stop right now", Intent.STOP, None),

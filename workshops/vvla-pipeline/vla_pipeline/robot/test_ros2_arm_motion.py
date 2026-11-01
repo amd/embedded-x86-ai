@@ -13,15 +13,16 @@ the physical rest pose (``REST_POSE``), and returns to rest between sweeps. This
 is a simple node check that every ROS 2 joint node commands its servo through
 its whole range - no pass/fail assertions, just visible motion.
 
-    client.go_to() → command_topic → So101ServerNode → Feetech bus → servos
+    client.move_to() → arm_controller → topic_based_ros2_control
+        → /so101/hardware/joint_commands → So101ServerNode → Feetech bus → servos
 
 Sweep order
 -----------
 1. **paired proximal move (coordinated)** - shoulder_lift and elbow_flex move
    TOGETHER away from rest (shoulder_lift to 50% of its travel, elbow_flex to
-   100%) and return together. Each runs its own smooth onboard move, but the
-   servo speeds are scaled to the travel so both finish at the same instant and
-   elbow_flex is always at 2× shoulder_lift's progress.
+   100%) and return together. The move is one trajectory goal, so both joints
+   finish at the same instant and elbow_flex is always at 2× shoulder_lift's
+   progress.
 2. **every remaining joint, one at a time** - shoulder_pan, wrist_flex,
    wrist_roll, gripper - each swept end to end on its own, returning to its rest
    before the next.
@@ -42,9 +43,9 @@ so each joint sweeps exactly as far as it was calibrated to travel. The hard
 
 Full speed
 ----------
-Moves are commanded with **no per-tick step cap** (``max_step_deg=0``): the
-command goes straight at the target and the servo moves as fast as it can.
-Durations are derived from travel distance at ``FULL_SPEED_DEG_PER_S``.
+Each move's duration is the servo profile planner's (``vla_pipeline.robot.servo_profile``)
+for the servos' full speed and acceleration; the trajectory controller
+interpolates it and reports when the joints got there.
 
 Calibration
 -----------
@@ -52,9 +53,10 @@ Before any motion the test checks for a LeRobot calibration file. If one exists
 it asks whether to recalibrate (default: keep it); if none exists, calibration
 is required and runs first. See ``--recalibrate`` / ``--skip-calibration``.
 
-By default the test spins the bus-owning server node **in-process**. If a server
-is already running elsewhere (``python -m vla_pipeline.robot.robot_node
---server``), pass ``--external-server`` to attach to it instead.
+By default the test spins the bus-owning server node **in-process** and starts
+its controllers (``launch/so101_control.launch.py``). If the server and its
+controllers already run elsewhere (``ros2 launch launch/strix_vla.launch.py``),
+pass ``--external-server`` to attach to them instead.
 
 Usage:
 
@@ -73,7 +75,6 @@ import argparse
 import logging
 import sys
 import threading
-import time
 
 from vla_pipeline.robot.arm_interface import (
     GRIPPER_CLOSED_FLOOR,
@@ -91,24 +92,9 @@ from vla_pipeline.robot.robot_node import (
     So101ServerNode,
     _require_ros2,
 )
-from vla_pipeline.utils.config import load_config
+from vla_pipeline.utils.config import DEFAULT_CONFIG, load_config
 
 logger = logging.getLogger("test_ros2_arm_motion")
-
-# Interpolation rate of go_to(). Oversampling the server control loop (tried at
-# 120 Hz) did NOT smooth the sweeps - the limiter is the server's effective
-# command rate, not setpoint granularity - so this stays at the control-loop
-# rate. Raising it again only helps once the server loop can sustain a higher
-# rate (check the PROFILE output from robot_node first).
-FPS = 30.0
-
-# Full speed. A comfortable "full" sweep speed for the SO-101 is ~90°/s. Move
-# durations are derived from this so the trajectory is streamed at FPS, but with
-# NO per-tick step cap the servo runs at its own full speed toward the target.
-FULL_SPEED_DEG_PER_S = 90.0
-
-# No per-tick command cap: full speed straight at the target.
-FULL_SPEED_STEP_DEG = 0.0
 
 # Choreography:
 #   1. shoulder_lift and elbow_flex move TOGETHER away from rest - shoulder_lift
@@ -123,12 +109,6 @@ PAIRED_JOINTS = ("shoulder_lift", "elbow_flex")
 PAIRED_FRACTION = 0.5
 PAIRED_FRACTIONS = {"shoulder_lift": 0.5, "elbow_flex": 1.0}
 
-# Floor on move duration so tiny moves still interpolate over several ticks.
-MIN_DURATION_S = 0.4
-
-# Pause between moves so each sweep reads as a distinct, settled motion.
-SETTLE_S = 0.6
-
 # Back the sweep extremes off the calibrated limits by this much so the arm
 # stops just short of its hard stops instead of straining against them. The
 # servo's own steady-state error already eats ~1-2° at a range edge; this keeps
@@ -136,11 +116,6 @@ SETTLE_S = 0.6
 # Units are degrees for the arm joints and the same magnitude for the gripper's
 # 0-100 scale (a few % off each end).
 SWEEP_MARGIN_DEG = 3.0
-
-
-def _duration_for(travel_deg: float) -> float:
-    """Seconds to cover ``travel_deg`` at full speed, with a sensible floor."""
-    return max(abs(travel_deg) / FULL_SPEED_DEG_PER_S, MIN_DURATION_S)
 
 
 def _sweep_range(
@@ -184,33 +159,13 @@ def _partial(joint: str, frac: float, limits: dict[str, tuple[float, float]]) ->
 
 
 def _move(arm: Ros2ArmClient, targets: dict[str, float]) -> None:
-    """Drive one or more joints to absolute targets at full speed (no step cap).
-
-    Duration is sized to the joint that has the farthest to travel, so a paired
-    move runs until the slowest joint arrives.
-    """
-    current = arm.get_joints()
-    travel = max((abs(t - current.get(j, t)) for j, t in targets.items()), default=0.0)
-    arm.go_to(
-        targets,
-        duration_s=_duration_for(travel),
-        fps=FPS,
-        max_step_deg=FULL_SPEED_STEP_DEG,
-    )
-    time.sleep(SETTLE_S)
+    """Drive one or more joints to absolute targets in one trajectory goal."""
+    how = arm.move_to(targets)
+    if how != "arrived":
+        logger.warning("  the move to %s ended %s", targets, how)
 
 
-def _home(arm: Ros2ArmClient, home: dict[str, float]) -> None:
-    """Bring the whole arm to the rest pose at full speed and let it settle."""
-    arm.go_to(home, duration_s=2.0, fps=FPS, max_step_deg=FULL_SPEED_STEP_DEG)
-    time.sleep(1.0)
-
-
-def run_motion_test(
-    arm: Ros2ArmClient,
-    limits: dict[str, tuple[float, float]] | None = None,
-    node=None,
-) -> None:
+def run_motion_test(arm: Ros2ArmClient, limits: dict[str, tuple[float, float]] | None = None) -> None:
     """Paired proximal move, then each remaining joint one by one.
 
     The arm always starts and finishes at ``REST_POSE``.
@@ -221,14 +176,9 @@ def run_motion_test(
         2. every remaining joint is swept end to end, one at a time, returning to
            its own rest after each.
 
-    The paired joints are coordinated by SPEED, not by streaming: each runs its
-    own smooth onboard move, but the servo speeds are scaled to the travel so both
-    finish at the same instant (elbow twice the travel → twice the speed → always
-    at 2× the shoulder's progress). This keeps the motion smooth - streaming a
-    joint trajectory fights the servo's onboard profile and comes out jittery.
-    Per-joint speed is a server-side setting, so it needs ``node`` (the in-process
-    So101ServerNode); without it the paired move still runs, just uncoordinated
-    (both at the default speed, so the longer-travel joint finishes later).
+    The paired move is one trajectory goal: the controller interpolates both
+    joints over the same duration, so they finish at the same instant (elbow
+    twice the travel → always at 2× the shoulder's progress).
 
     Full speed throughout. ``limits`` come from the calibration file and define
     how far each joint sweeps; missing entries fall back to ``JOINT_LIMITS``.
@@ -237,11 +187,9 @@ def run_motion_test(
     home = dict(REST_POSE)
 
     logger.info("Homing to rest pose at full speed...")
-    _home(arm, home)
+    _move(arm, home)
 
-    # 1) Move the paired joints out, then back, coordinated so they arrive
-    #    together. Speed ∝ travel (set once from the out-travel; the return has
-    #    the same magnitudes), then restore the default speed afterward.
+    # 1) Move the paired joints out, then back, in one goal each way.
     out = {
         j: _partial(j, PAIRED_FRACTIONS.get(j, PAIRED_FRACTION), limits)
         for j in PAIRED_JOINTS
@@ -253,25 +201,10 @@ def run_motion_test(
         for j in PAIRED_JOINTS
     )
 
-    cur = arm.get_joints()
-    travels = {j: abs(out[j] - cur.get(j, out[j])) for j in PAIRED_JOINTS}
-    if node is not None:
-        node.set_coordinated_speeds(travels)
-    elif len(PAIRED_JOINTS) > 1:
-        logger.warning(
-            "No in-process node - paired move runs uncoordinated "
-            "(both joints at default speed)."
-        )
-    try:
-        logger.info("Paired move (coordinated, arrive together): %s", detail)
-        _move(arm, out)
-        logger.info(
-            "  returning %s to rest (coordinated)...", " + ".join(PAIRED_JOINTS)
-        )
-        _move(arm, back)
-    finally:
-        if node is not None:
-            node.reset_joint_speeds()  # restore default speed for the sweeps
+    logger.info("Paired move (coordinated, arrive together): %s", detail)
+    _move(arm, out)
+    logger.info("  returning %s to rest (coordinated)...", " + ".join(PAIRED_JOINTS))
+    _move(arm, back)
 
     # 2) Sweep every remaining joint end to end, one at a time.
     singles = [j for j in MOTOR_NAMES if j not in PAIRED_JOINTS]
@@ -284,36 +217,33 @@ def run_motion_test(
         logger.info("  returning %s to rest before next joint...", joint)
         _move(arm, {joint: rest_j})
 
-    _home(arm, home)  # settle whole arm at rest
+    _move(arm, home)  # settle whole arm at rest
 
     logger.info(
-        "Done - %s moved together (lockstep) out and back, then %d joints one by one.",
+        "Done - %s moved together out and back, then %d joints one by one.",
         " + ".join(PAIRED_JOINTS),
         len(singles),
     )
 
 
-def _spin_server_in_process(cfg: dict):
-    """Start a real-hardware So101ServerNode on a background executor.
-
-    Returns (node, executor, thread) so the caller can tear it down.
-    """
+def _start_stack(cfg: dict, config_path):
+    """A real-hardware So101ServerNode on the hardware topics, on a background
+    executor, and its controllers. Returns ``(node, executor, launch)``."""
     import rclpy
-    from rclpy.executors import MultiThreadedExecutor
+    from rclpy.executors import SingleThreadedExecutor
+
+    from so101_sim.control import HARDWARE_COMMANDS, HARDWARE_STATES, start_controllers
 
     if not rclpy.ok():
         rclpy.init()
-
-    node = So101ServerNode(cfg, dry_run=False)
-    executor = MultiThreadedExecutor(num_threads=2)
+    robot = {**cfg["robot"], "command_topic": HARDWARE_COMMANDS, "state_topic": HARDWARE_STATES}
+    node = So101ServerNode({**cfg, "robot": robot}, dry_run=False)
+    # One thread: rclpy's MultiThreadedExecutor rebuilds its wait set in a
+    # tight loop under the controllers' 60 Hz setpoints (see robot_node).
+    executor = SingleThreadedExecutor()
     executor.add_node(node)
-    thread = threading.Thread(target=executor.spin, daemon=True)
-    thread.start()
-
-    # Give the control loop a beat to publish its first state message so the
-    # client's startup timeout has something to latch onto.
-    time.sleep(0.5)
-    return node, executor, thread
+    threading.Thread(target=executor.spin, daemon=True).start()
+    return node, executor, start_controllers(config_path, "pipeline")
 
 
 def _ensure_calibration(
@@ -384,7 +314,7 @@ def main() -> None:
     parser.add_argument(
         "--external-server",
         action="store_true",
-        help="attach to a server already running elsewhere instead of spinning one",
+        help="attach to a server and controllers already running elsewhere instead of starting them",
     )
     parser.add_argument(
         "--yes",
@@ -422,14 +352,16 @@ def main() -> None:
 
     import rclpy
 
-    server = executor = spin_thread = None
+    from so101_sim.control import stop_controllers
+
+    server = executor = launch = None
     arm = None
     try:
         if not args.external_server:
-            logger.info("Spinning So101ServerNode in-process (real hardware)...")
-            server, executor, spin_thread = _spin_server_in_process(cfg)
+            logger.info("Spinning So101ServerNode in-process (real hardware) and starting its controllers...")
+            server, executor, launch = _start_stack(cfg, args.config or DEFAULT_CONFIG)
         else:
-            logger.info("Using external server (expecting --server running elsewhere).")
+            logger.info("Using an external server and controllers (strix_vla.launch.py running elsewhere).")
             if not rclpy.ok():
                 rclpy.init()
 
@@ -444,14 +376,14 @@ def main() -> None:
                 "No calibration limits available - falling back to "
                 "hard-coded JOINT_LIMITS."
             )
-        run_motion_test(arm, limits=limits or None, node=server)
+        run_motion_test(arm, limits=limits or None)
 
     except KeyboardInterrupt:
         logger.warning("Interrupted -- parking arm and shutting down.")
     finally:
         if arm is not None:
             try:
-                arm.go_to_rest(duration_s=3.0)
+                arm.move_to(dict(REST_POSE))
             except Exception as e:
                 logger.error("Rest-park via client failed: %s", e)
             try:
@@ -459,6 +391,11 @@ def main() -> None:
             except Exception as e:
                 logger.error("Client close failed: %s", e)
 
+        if launch is not None:
+            try:
+                stop_controllers(launch)
+            except Exception as e:
+                logger.error("Controller shutdown failed: %s", e)
         if server is not None:
             try:
                 if executor is not None:

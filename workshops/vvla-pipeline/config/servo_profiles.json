@@ -1,0 +1,77 @@
+{
+  "policy": {
+    "cruise_frac_of_stall": 0.7,
+    "peak_frac_of_stall": 0.95
+  },
+  "inputs": {
+    "model": "so101_sim/src/so101_sim/models/scene_vvla.xml",
+    "stall_torque_nm": 1.91,
+    "overload_threshold_frac": 0.8,
+    "protection_time_s": 2.0,
+    "max_speed_raw": 3073.0,
+    "accel_unit_steps": 100.0,
+    "payload": {
+      "prop": "bottle",
+      "kg": 0.06
+    },
+    "envelope": "common.motion.JOINT_LIMITS",
+    "samples": 20000,
+    "seed": 0
+  },
+  "bus_tick": {
+    "estimated_s": 0.004,
+    "max_rate_hz": 250.0,
+    "measured_s": null,
+    "note": "Feetech protocol at 1 Mbps, not measured on the real arm"
+  },
+  "joints": {
+    "shoulder_pan": {
+      "gravity_nm": 0.0,
+      "inertia_kgm2": 0.06768,
+      "speed_raw": 1396,
+      "accel_raw": 46,
+      "speed_deg_s": 122.7,
+      "accel_deg_s2": 404.3
+    },
+    "shoulder_lift": {
+      "gravity_nm": 1.102,
+      "inertia_kgm2": 0.06039,
+      "speed_raw": 199,
+      "accel_raw": 52,
+      "speed_deg_s": 17.5,
+      "accel_deg_s2": 457.0
+    },
+    "elbow_flex": {
+      "gravity_nm": 0.611,
+      "inertia_kgm2": 0.04021,
+      "speed_raw": 733,
+      "accel_raw": 77,
+      "speed_deg_s": 64.4,
+      "accel_deg_s2": 676.8
+    },
+    "wrist_flex": {
+      "gravity_nm": 0.179,
+      "inertia_kgm2": 0.02957,
+      "speed_raw": 1201,
+      "accel_raw": 105,
+      "speed_deg_s": 105.6,
+      "accel_deg_s2": 922.9
+    },
+    "wrist_roll": {
+      "gravity_nm": 0.007,
+      "inertia_kgm2": 0.02807,
+      "speed_raw": 1389,
+      "accel_raw": 111,
+      "speed_deg_s": 122.1,
+      "accel_deg_s2": 975.6
+    },
+    "gripper": {
+      "gravity_nm": 0.004,
+      "inertia_kgm2": 0.02802,
+      "speed_raw": 1580,
+      "accel_raw": 126,
+      "speed_deg_s": 122.4,
+      "accel_deg_s2": 976.0
+    }
+  }
+}

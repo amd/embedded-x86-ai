@@ -82,7 +82,7 @@ This project is licensed under the BSD 3-Clause License — see the [`LICENSE`](
 
 ## Install Ryzen AI Software 1.7.1
 
-Reference: [Linux Installation Instructions — Ryzen AI Software 1.7.1 documentation](https://ryzenai.docs.amd.com/en/latest/linux.html).
+Reference: [Linux Installation Instructions — Ryzen AI Software 1.7.1 documentation](https://ryzenai.docs.amd.com/en/1.7.1/linux.html). The same driver steps are in [workshops/vvla-pipeline/README.md](../vvla-pipeline/README.md#installation).
 
 ### 1. Compatible hardware
 You need an AMD Ryzen AI processor with an XDNA NPU (Ryzen AI 300 series or later).
@@ -95,7 +95,7 @@ lspci -nn | grep 1022:17f0    # STX/KRK NPU signature
 **Requirements:** Ubuntu 24.04 LTS, kernel ≥ 6.10, Python 3.12.x, 64GB RAM recommended.
 ```bash
 sudo apt update
-sudo apt install -y python3.12 python3.12-venv libboost-filesystem1.74.0
+sudo apt install -y python3.12 python3.12-venv libboost-filesystem1.74.0 dkms
 ```
 
 ### 3. Downloads
@@ -104,21 +104,27 @@ sudo apt install -y python3.12 python3.12-venv libboost-filesystem1.74.0
 - `ryzen_ai-1.7.1.tgz` — [Ryzen AI Software](https://account.amd.com/en/forms/downloads/xef.html?filename=ryzen_ai-1.7.1.tgz)
 
 ### 4. Install the NPU drivers (XRT)
+
+The zip may unpack into a subdirectory, so the `find` lands in the directory that holds the `.deb` files.
+
 ```bash
 cd ~/Downloads
-sudo apt install -y dkms
-unzip RAI_1.7.1_Linux_NPU_XRT.zip
+unzip -o RAI_1.7.1_Linux_NPU_XRT.zip -d RAI_1.7.1_Linux_NPU_XRT
+cd "$(dirname "$(find RAI_1.7.1_Linux_NPU_XRT -name 'xrt_202610.2.21.75_24.04-amd64-base.deb' -print -quit)")"
 sudo apt install --fix-broken -y ./xrt_202610.2.21.75_24.04-amd64-base.deb
 sudo apt install --fix-broken -y ./xrt_202610.2.21.75_24.04-amd64-base-dev.deb
 sudo apt install --fix-broken -y ./xrt_202610.2.21.75_24.04-amd64-npu.deb
 sudo apt install --fix-broken -y ./xrt_plugin.2.21.260102.53.release_24.04-amd64-amdxdna.deb
 ```
 
-### 5. Set the environment and verify the driver sees the NPU:
+### 5. Set the environment and verify the driver sees the NPU
+
+`xrt-smi examine` must list a device under `Device(s) Present`. The name depends on the machine (`RyzenAI-npu5`, `NPU Strix`, `NPU Strix Halo`). If the table is empty, stop. Do not install the software or compile a model.
+
 ```bash
-export LD_LIBRARY_PATH="/lib/x86_64-linux-gnu:$HOME/ryzenai/venv/onnxruntime/lib/:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
 source /opt/xilinx/xrt/setup.sh
-xrt-smi examine          # should list the NPU (e.g. BDF 0000:c5:00.1, "NPU Strix Halo")
+xrt-smi examine
 ```
 
 ### 6. Install Ryzen AI Software 1.7.1 (creates the venv)
@@ -174,7 +180,7 @@ xrt-smi examine -r platform | grep -i mode    # should report turbo
 Every new shell needs both the XRT environment (for the NPU) and the venv (for Python):
 
 ```bash
-export LD_LIBRARY_PATH="/lib/x86_64-linux-gnu:$HOME/ryzenai/venv/onnxruntime/lib/:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
 source /opt/xilinx/xrt/setup.sh
 source $HOME/ryzenai/venv/bin/activate
 ```

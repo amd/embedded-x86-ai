@@ -66,11 +66,17 @@ _ROTATIONS = {
 
 
 class CameraNode(Node):
-    """Owns one V4L2 device and publishes frames + health."""
+    """Owns one V4L2 device and publishes frames + health.
 
-    def __init__(self, role: str, defaults: dict):
+    ``frame_source`` (any object with ``read() -> (ok, frame)`` and
+    ``release()``, e.g. ``so101_sim.SimCamera``) replaces the V4L2 device -
+    that is how the digital twin publishes its wrist camera on the same topic.
+    """
+
+    def __init__(self, role: str, defaults: dict, frame_source=None):
         super().__init__(f"camera_{role}_node")
         self.role = role
+        self._source = frame_source
         self.declare_parameter("device", defaults.get("device", 0))
         self.declare_parameter("width", int(defaults.get("width", 640)))
         self.declare_parameter("height", int(defaults.get("height", 480)))
@@ -103,7 +109,7 @@ class CameraNode(Node):
         self._frame_timer = self.create_timer(1.0 / self._fps, self._tick)
         self._retry_timer = self.create_timer(self._reopen_interval, self._retry)
         self.get_logger().info(
-            f"camera '{role}' device={self._device} {self._size[0]}x{self._size[1]}"
+            f"camera '{role}' device={'sim' if frame_source is not None else self._device} {self._size[0]}x{self._size[1]}"
             f"@{self._fps:.0f} → {p('topic')}"
         )
 
@@ -111,6 +117,9 @@ class CameraNode(Node):
 
     def _open(self) -> None:
         """Open the V4L2 device and configure its resolution/fps/buffer size."""
+        if self._source is not None:
+            self._cap = self._source
+            return
         cap = cv2.VideoCapture(self._device)
         if cap.isOpened():
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._size[0])
@@ -132,10 +141,6 @@ class CameraNode(Node):
 
     def _tick(self) -> None:
         """Timer callback: publish one frame (and the health flag) if the device is open."""
-        # During shutdown (SIGINT from the launcher) a timer can fire once more
-        # after the context is torn down; skip rather than crash with RCLError.
-        if not rclpy.ok():
-            return
         healthy = False
         if self._cap is not None:
             ok, frame = self._cap.read()
@@ -151,16 +156,13 @@ class CameraNode(Node):
                 msg.data = frame.tobytes()
                 self._pub.publish(msg)
                 healthy = True
-            else:
+            elif self._source is None:
                 self._cap.release()
                 self._cap = None
                 self.get_logger().warning(
                     f"camera '{self.role}' read failed - reopening"
                 )
-        try:
-            self._health_pub.publish(Bool(data=healthy))
-        except Exception:
-            pass  # context torn down mid-shutdown
+        self._health_pub.publish(Bool(data=healthy))
 
     def destroy_node(self) -> None:
         """Release the capture device before the base class teardown."""
@@ -181,18 +183,17 @@ def main() -> None:
     parser.add_argument("--config", default=None)
     args, ros_args = parser.parse_known_args()
 
+    from rclpy.executors import SingleThreadedExecutor
+
+    from so101_sim.spin import spin_until_shutdown
+
     defaults = (load_config(args.config).get("cameras") or {}).get(args.role, {})
     rclpy.init(args=ros_args)
     node = CameraNode(args.role, defaults)
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
-    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
-        pass
-    except Exception as e:
-        # RCLError on a publish during teardown is expected when the launcher
-        # SIGINTs us mid-tick; anything else is worth surfacing.
-        if "context is invalid" not in str(e) and "shutdown" not in str(e).lower():
-            raise
+        spin_until_shutdown(executor)
     finally:
         try:
             node.destroy_node()

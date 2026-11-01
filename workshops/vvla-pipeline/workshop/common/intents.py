@@ -30,6 +30,7 @@ class Intent(str, Enum):
     PICK_PLACE = "pick_place"
     DANCE = "dance"
     GRIP = "grip"
+    RELEASE = "release"
     WAVE = "wave"
     HOME = "home"
     STOP = "stop"
@@ -126,6 +127,9 @@ Commands:
 - "dance": the user wants the robot to dance / groove / party.
 - "grip": the user is handing the robot something to hold ("hold this",
   "take this pencil", "grab what I give you").
+- "release": the user wants the jaws opened, here, so they can take the
+  object or drop it ("release", "open", "drop it", "let go",
+  "open your hand").
 - "wave": the user wants a wave / greeting ("wave at me", "say hi").
 - "home": return to the rest/home position ("go home", "reset position",
   "rest now").
@@ -173,9 +177,13 @@ def _normalize_transcript(text: str) -> str:
     return re.sub(r"[\s\.\,\!\?\"\'`]+$", "", (text or "").strip().lower()).strip()
 
 
+# Whisper's non-speech annotations: [BLANK_AUDIO], (sighs), *music*.
+_NON_SPEECH_TAG = re.compile(r"\[[^\]]*\]|\([^)]*\)|\*[^*]*\*")
+
+
 def is_noise(text: str) -> bool:
     """True for known silence-hallucination phrases and empty transcripts."""
-    norm = _normalize_transcript(text)
+    norm = _normalize_transcript(_NON_SPEECH_TAG.sub(" ", text or ""))
     if not norm:
         return True
     if not any(c.isalpha() for c in norm):

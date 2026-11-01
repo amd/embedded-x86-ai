@@ -1,6 +1,8 @@
 # Strix VLA pipeline - Python dependencies (installed by bootstrap.sh via uv)
-# Hardware-specific wheels (torch+ROCm gfx1151, Ryzen AI onnxruntime-vitisai)
-# are installed separately by bootstrap.sh.
+# Hardware-specific wheels (torch+ROCm, Ryzen AI onnxruntime-vitisai)
+# are installed separately by bootstrap.sh. Do not add torch here: the PyPI
+# wheel is a CUDA build and downloads the NVIDIA CUDA stack. bootstrap.sh
+# installs the ROCm wheel first and pins it.
 
 numpy<2                    # onnxruntime + AMD wheels are built against numpy 1.x; 2.x crashes the ORT import
 opencv-contrib-python>=4.10  # GUI-enabled (cv2.imshow); bootstrap.sh re-pins this LAST and strips any -headless variant that mediapipe/ultralytics/optimum drag in

@@ -12,12 +12,9 @@ camera instead of V4L2, a dry-run arm instead of the Feetech bus, a keyword
 brain instead of llama-server - so every topic round-trip is real even with
 zero hardware attached.
 
-Transport:
-- With ROS 2 installed, the checks run over real rclpy/DDS in-process.
-- Without it, an in-memory ROS shim (``common.fakeros``) is installed first,
-  so the same student code runs unmodified. The shim even enforces DDS
-  reliability matching - a RELIABLE subscriber will not hear a BEST_EFFORT
-  publisher, exactly like the real rig.
+Transport: real rclpy/DDS in-process. ROS 2 is required (``source
+/opt/ros/jazzy/setup.bash``). The arm checks run the arm under ros2_control,
+as the rig does: the controllers start with ``launch/so101_control.launch.py``.
 
 The on-hardware equivalents (real cameras, real arm, ros2 CLI inspection)
 are listed at the end of each ROS notebook.
@@ -31,7 +28,6 @@ import sys
 import threading
 import time
 
-from common import fakeros
 from common.config import PROJECT_ROOT, load_config
 from common.feedback import Reporter
 
@@ -39,7 +35,12 @@ ARTIFACTS = PROJECT_ROOT / "_artifacts"
 
 
 class _Runner:
-    """Spin a node on a background executor; stop cleanly."""
+    """Spin a node on a background executor; stop cleanly.
+
+    A thread left inside ``executor.spin()`` aborts the process at exit
+    ("terminate called without an active exception"), so the thread spins
+    ``spin_once`` in a loop that ``stop`` ends and joins.
+    """
 
     def __init__(self, node):
         from rclpy.executors import SingleThreadedExecutor
@@ -47,11 +48,18 @@ class _Runner:
         self.node = node
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(node)
-        self._thread = threading.Thread(target=self.executor.spin, daemon=True)
+        self._running = True
+        self._thread = threading.Thread(target=self._spin, daemon=True)
         self._thread.start()
 
+    def _spin(self):
+        while self._running:
+            self.executor.spin_once(timeout_sec=0.05)
+
     def stop(self):
-        """Shut down the executor and destroy the node."""
+        """Stop the spin thread, shut down the executor and destroy the node."""
+        self._running = False
+        self._thread.join(timeout=2.0)
         self.executor.shutdown()
         try:
             self.node.destroy_node()
@@ -60,27 +68,11 @@ class _Runner:
 
 
 def _graph_feedback(topic: str) -> str:
-    """Explain (from the fake broker) why a topic round-trip went silent."""
-    if not fakeros.INSTALLED:
-        return (
-            f"nothing arrived on {topic} - check the topic names and QoS "
-            "on both ends (ros2 topic list / ros2 topic info -v)"
-        )
-    g = fakeros.BROKER.graph()
-    lines = [f"nothing arrived on {topic}."]
-    lines.append(f"publishers seen:  {g['publishers'] or '(none!)'}")
-    lines.append(f"subscribers seen: {g['subscribers'] or '(none!)'}")
-    if fakeros.BROKER.qos_drops:
-        t, p, s = fakeros.BROKER.qos_drops[-1]
-        lines.append(
-            f"QoS mismatch on {t}: publisher '{p}' is BEST_EFFORT but "
-            f"subscriber '{s}' asked for RELIABLE - they never match. "
-            "Use best-effort on the subscriber for sensor streams."
-        )
-    if fakeros.BROKER.errors:
-        t, n, e = fakeros.BROKER.errors[-1]
-        lines.append(f"callback error on {t} in '{n}': {e!r}")
-    return "\n".join(lines)
+    """Explain why a topic round-trip went silent."""
+    return (
+        f"nothing arrived on {topic} - check the topic names and QoS "
+        "on both ends (ros2 topic list / ros2 topic info -v)"
+    )
 
 
 def _wait_for(predicate, timeout_s: float, interval: float = 0.02):
@@ -205,15 +197,21 @@ def check_cameras(rep: Reporter, cfg: dict) -> None:
 
 
 def check_arm(rep: Reporter, cfg: dict) -> None:
-    """Verify the arm server node and client wiring: construction, state, commands, clamping."""
+    """Verify the arm server node and client wiring over ros2_control:
+    construction, state, commands, clamping."""
+    from so101_sim.control import HARDWARE_COMMANDS, HARDWARE_STATES, start_controllers, stop_controllers
+
+    from common.config import DEFAULT_CONFIG
     from common.motion import JOINT_LIMITS, REST_POSE, DryRunArm
     from ros.arm_client import Ros2ArmClient
     from ros.arm_node import So101ServerNode
 
+    # The server on the hardware side's topics, as the launch remaps them.
+    hardware = {**cfg, "robot": {**cfg["robot"], "command_topic": HARDWARE_COMMANDS, "state_topic": HARDWARE_STATES}}
     ok_node, node = rep.run(
         "2.4",
         "arm server node constructs (cmd sub + state pub)",
-        lambda: So101ServerNode(cfg, arm=DryRunArm()),
+        lambda: So101ServerNode(hardware, arm=DryRunArm()),
         hint="subscription on robot.command_topic → _on_command; publisher "
         "on robot.state_topic; best-effort/keep-last/depth-1 both ends",
     )
@@ -222,16 +220,19 @@ def check_arm(rep: Reporter, cfg: dict) -> None:
             rep.add(t, "arm checks", "SKIP", "needs TODO 2.4")
         return
     runner = _Runner(node)
+    controllers_log = ARTIFACTS / "selftest_controllers.log"
+    with open(controllers_log, "w") as log:
+        controllers = start_controllers(DEFAULT_CONFIG, "workshop", log=log)
 
     arm = None
     try:
         ok_client, arm = rep.run(
             "2.7",
-            "arm client constructs and sees the state stream",
-            lambda: Ros2ArmClient(cfg, state_timeout_s=4.0),
-            hint="if this times out: the client's subscription QoS must be "
-            "best-effort to match the server, and TODO 2.6 must publish "
-            "state for there to be anything to hear",
+            "arm client constructs and sees the controllers' state",
+            lambda: Ros2ArmClient(cfg),
+            hint="if this times out: TODO 2.7 must subscribe to /joint_states "
+            "and create the trajectory action client, and TODO 2.6 must publish "
+            f"state for the controllers to start (their log: {controllers_log})",
         )
         if not ok_client:
             for t in ("2.5", "2.6", "2.8", "2.9"):
@@ -276,14 +277,15 @@ def check_arm(rep: Reporter, cfg: dict) -> None:
             )
             assert got, (
                 "commanded gripper=60 but the state never followed - check "
-                "_on_command (does it update the target under the lock?) and "
-                "send_joints (right topic? right message layout?)\n"
-                + _graph_feedback(cfg["robot"]["command_topic"])
+                "_on_command (radians to degrees, then the target under the lock?), "
+                "_publish_state (radians?) and send_joints (the gripper's forward "
+                "controller? radians?)\n"
+                + _graph_feedback(HARDWARE_COMMANDS)
             )
             print(
                 f"          round-trip: gripper {REST_POSE['gripper']:.0f} → 60 [ok] (commanded via "
-                f"{cfg['robot']['command_topic']}, observed via "
-                f"{cfg['robot']['state_topic']})"
+                f"the gripper's forward controller and {HARDWARE_COMMANDS}, observed via "
+                f"{HARDWARE_STATES} and /joint_states)"
             )
 
         rep.run(
@@ -319,6 +321,7 @@ def check_arm(rep: Reporter, cfg: dict) -> None:
                 arm.close()
             except Exception:
                 pass
+        stop_controllers(controllers)
         runner.stop()
 
 
@@ -430,29 +433,16 @@ def check_intent(rep: Reporter, cfg: dict) -> None:
 
 
 def main() -> int:
-    """CLI: run every component 2 check against real or shimmed ROS 2 and print a summary."""
-    parser = argparse.ArgumentParser(description="Component 2 self-test")
-    parser.add_argument(
-        "--fake",
-        action="store_true",
-        help="force the in-memory ROS shim even if ROS 2 exists",
-    )
-    args = parser.parse_args()
+    """CLI: run every component 2 check over ROS 2 and print a summary."""
+    argparse.ArgumentParser(description="Component 2 self-test (requires ROS 2)").parse_args()
+    try:
+        import rclpy
+    except ImportError as e:
+        raise SystemExit(f"ROS 2 is required: source /opt/ros/jazzy/setup.bash first ({e})") from e
 
     ARTIFACTS.mkdir(exist_ok=True)
-    used_fake = fakeros.install(force=args.fake)
-
     rep = Reporter("Component 2 - ROS 2 nodes & topics")
-    if used_fake:
-        print(
-            "  transport: in-memory ROS shim (no ROS 2 here - wiring checks "
-            "only; re-run on the rig for the real thing)"
-        )
-    else:
-        print("  transport: real ROS 2 (rclpy)")
-
-    import rclpy
-
+    print("  transport: ROS 2 (rclpy)")
     if not rclpy.ok():
         rclpy.init()
 
@@ -462,14 +452,13 @@ def main() -> int:
     check_intent(rep, cfg)
 
     code = rep.summary()
-    if not used_fake:
-        print("\nOn-hardware next steps (each in its own terminal):")
-        print("  python -m ros.camera_node --role mount")
-        print("  python -m ros.arm_node --dry-run   (drop --dry-run for the real arm)")
-        print("  python -m ros.intent_node --mock")
-        print(
-            "  ros2 topic hz /cameras/mount/image_raw && ros2 topic echo /so101/joint_state"
-        )
+    print("\nOn-hardware next steps (each in its own terminal):")
+    print("  python -m ros.camera_node --role mount")
+    print("  python -m ros.node_supervisor --only arm --dry-run   (drop --dry-run for the real arm)")
+    print("  python -m ros.intent_node --mock")
+    print(
+        "  ros2 topic hz /cameras/mount/image_raw && ros2 topic echo /joint_states"
+    )
     try:
         rclpy.shutdown()
     except Exception:

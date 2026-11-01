@@ -18,11 +18,12 @@ What it checks, per component-3 TODO:
   handlers (and STOP deliberately is NOT - it's an interrupt, not a behavior).
 - **3.2 handle_transcript** - the safety gauntlet in order: the stop fast
   path (sets the stop event, bypasses the parser), the noise gate (drops
-  Whisper's silence hallucinations before the LLM), normal dispatch, and the
-  stop-event hygiene that keeps a stale stop from killing the next behavior.
+  Whisper's silence hallucinations before the LLM), normal dispatch, the
+  stop-event hygiene that keeps a stale stop from killing the next behavior,
+  and a stop said while the LLM parses keeping that command from running.
 - **3.3 mimic_tick** - one camera frame → pose + hands → mapper → a full,
   clamped arm command; it follows the NEAREST person (largest box) and
-  honors the grip lock so a held object stays held.
+  drives the gripper from the pinch.
 - **3.4 run_dance** - beat-paced choreography that stays stoppable and
   always parks at the rest pose.
 
@@ -98,6 +99,21 @@ def _make_ctx(cfg, *, registry=None):
         registry=registry,
         headless=True,
     )
+
+
+class _FixedPinch:
+    """Scripted hands with the pinch held at one value."""
+
+    def __init__(self, pinch: float):
+        from common.fixtures import ScriptedHands
+
+        self._inner, self._pinch = ScriptedHands(), float(pinch)
+
+    def process(self, frame):
+        obs, raw = self._inner.process(frame)
+        if obs is not None:
+            obs.pinch = self._pinch
+        return obs, raw
 
 
 # =============================================================================
@@ -229,7 +245,7 @@ def check_dispatch(rep: Reporter, cfg: dict) -> None:
         "3.2",
         "stop fast path sets the event and skips the parser",
         stop_fast_path,
-        hint="is_stop(text) FIRST → ctx.stop_event.set(); return STOP",
+        hint="is_stop(text) FIRST → ctx.request_stop(); return STOP",
     )
 
     def noise_gate():
@@ -276,7 +292,36 @@ def check_dispatch(rep: Reporter, cfg: dict) -> None:
         "3.2",
         "normal command dispatches with a clean stop event",
         dispatch_and_clear,
-        hint="clear ctx.stop_event before AND after running the handler",
+        hint="ctx.begin(heard) before the handler (it clears a stale stop), "
+        "ctx.stop_event.clear() after it",
+    )
+
+    def stop_during_parse():
+        """Verify a stop said while the LLM parses keeps the parsed command from running."""
+        dispatched.clear()
+        parsed.clear()
+        ctx.stop_event.clear()
+
+        def parse_then_hear_stop(text: str) -> ParsedCommand:
+            """The LLM parses; meanwhile the always-hot listener hears 'stop'."""
+            cmd = parse(text)
+            handle_transcript(ctx, "stop", parse)
+            return cmd
+
+        handle_transcript(ctx, "show me a dance", parse_then_hear_stop)
+        assert not dispatched, (
+            f"dispatch record {dispatched} - a stop said while the LLM parsed must "
+            "keep that command from running: read ctx.stops_heard() before "
+            "parse(), and run the handler only if ctx.begin(heard) returns True"
+        )
+        assert ctx.stop_event.is_set(), "the stop must stay in effect"
+
+    rep.run(
+        "3.2",
+        "a stop said while the LLM parses cancels that command",
+        stop_during_parse,
+        hint="heard = ctx.stops_heard(); cmd = parse(text); ...; "
+        "if not ctx.begin(heard): return cmd",
     )
 
     def unknown_reported():
@@ -373,26 +418,27 @@ def check_mimic(rep: Reporter, cfg: dict) -> None:
             "needs mimic_tick first",
         )
 
-    def grip_lock():
-        """Verify a set grip lock overrides the gripper so a held object stays held."""
-        lock_ctx = _make_ctx(cfg)
-        lock_ctx.shared_state["grip_lock"] = True
-        lock_ctx.shared_state["grip_lock_pos"] = 70.0
-        sig = mimic_tick(lock_ctx, frame)
-        assert sig.joints is not None, "grip lock: a command should still be sent"
-        assert abs(sig.joints["gripper"] - 70.0) < 1e-6, (
-            f"gripper={sig.joints['gripper']:.1f} but grip_lock_pos=70 - pass "
-            "ctx.shared_state['grip_lock_pos'] as gripper_override so a held "
-            "object is not dropped mid-mimic"
+    def pinch_drives_gripper():
+        """Verify the pinch reaches the gripper: fingers together close the jaws."""
+        from common.motion import GRIPPER_CLOSED_FLOOR
+
+        grips = {}
+        for label, pinch in (("together", 0.05), ("apart", 1.4)):
+            pinch_ctx = _make_ctx(cfg)
+            pinch_ctx.hands = _FixedPinch(pinch)
+            sig = mimic_tick(pinch_ctx, frame)
+            assert sig.joints is not None, "pinch: a command should be sent"
+            grips[label] = sig.joints["gripper"]
+        assert grips["together"] <= GRIPPER_CLOSED_FLOOR + 1.0 < grips["apart"] - 30.0, (
+            f"gripper {grips['together']:.1f} with the fingers together and "
+            f"{grips['apart']:.1f} with them apart - pass obs.pinch to ctx.mapper.step(pinch=...)"
         )
 
     if ok_tick:
-        rep.run(
-            "3.3", "mimic_tick honors the grip lock (held object stays held)", grip_lock
-        )
+        rep.run("3.3", "mimic_tick drives the gripper from the pinch", pinch_drives_gripper)
     else:
         rep.add(
-            "3.3", "mimic_tick honors the grip lock", "SKIP", "needs mimic_tick first"
+            "3.3", "mimic_tick drives the gripper from the pinch", "SKIP", "needs mimic_tick first"
         )
 
 

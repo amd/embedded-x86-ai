@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+  SPDX-License-Identifier: BSD-3-Clause
+
+  Discovery for the notebook twin. Builtin transports stay on, so
+  FASTDDS_BUILTIN_TRANSPORTS=LARGE_DATA (scripts/ryzen_ai_env.sh) still
+  carries camera frames. ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST cannot:
+  that range replaces the builtin transports with small defaults.
+-->
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <profiles>
+        <participant profile_name="twin_localhost" is_default_profile="true">
+            <rtps>
+                <builtin>
+                    <discovery_config>
+                        <ignoreParticipantFlags>FILTER_DIFFERENT_HOST</ignoreParticipantFlags>
+                    </discovery_config>
+                    <avoid_builtin_multicast>true</avoid_builtin_multicast>
+                    <initialPeersList>
+                        <locator>
+                            <udpv4>
+                                <address>127.0.0.1</address>
+                            </udpv4>
+                        </locator>
+                    </initialPeersList>
+                </builtin>
+            </rtps>
+        </participant>
+    </profiles>
+</dds>

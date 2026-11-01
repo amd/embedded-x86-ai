@@ -1,0 +1,78 @@
+<?xml version="1.0"?>
+<!--
+  SO-101 for ros2_control. The kinematic chain is adapted from
+  JafarAbdi/ros2_so_arm100 @ e166df9 (so_arm101_description/urdf/so_arm101_macro.xacro,
+  BSD-3-Clause, see LICENSE.ros2_so_arm100): our joint names, no meshes, and the
+  gripper joint frame taken from the twin's MJCF (../models/so101.xml), so that
+  the same radians put both models in the same pose. Limits are arguments in
+  radians and N·m; robot_description() fills them from the host stack's tables.
+  Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="so101">
+  <xacro:arg name="joint_commands_topic" default="/so101/joint_command"/>
+  <xacro:arg name="joint_states_topic" default="/so101/joint_state"/>
+  <xacro:arg name="joint_state_timeout" default="0.0"/>
+  <xacro:arg name="effort" default="1.91"/>
+
+  <xacro:macro name="revolute" params="name parent child xyz rpy">
+    <joint name="${name}" type="revolute">
+      <origin xyz="${xyz}" rpy="${rpy}"/>
+      <parent link="${parent}"/>
+      <child link="${child}"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="$(arg ${name}_lower)" upper="$(arg ${name}_upper)"
+             effort="$(arg effort)" velocity="$(arg ${name}_velocity)"/>
+    </joint>
+  </xacro:macro>
+
+  <link name="base_link"/>
+  <link name="shoulder_link"/>
+  <link name="upper_arm_link"/>
+  <link name="lower_arm_link"/>
+  <link name="wrist_link"/>
+  <link name="gripper_link"/>
+  <link name="jaw_link"/>
+
+  <xacro:revolute name="shoulder_pan" parent="base_link" child="shoulder_link"
+                  xyz="0.0388353 -8.97657e-09 0.0624" rpy="3.14159 4.18253e-17 -3.14159"/>
+  <xacro:revolute name="shoulder_lift" parent="shoulder_link" child="upper_arm_link"
+                  xyz="-0.0303992 -0.0182778 -0.0542" rpy="-1.5708 -1.5708 0"/>
+  <xacro:revolute name="elbow_flex" parent="upper_arm_link" child="lower_arm_link"
+                  xyz="-0.11257 -0.028 1.73763e-16" rpy="-3.63608e-16 8.74301e-16 1.5708"/>
+  <xacro:revolute name="wrist_flex" parent="lower_arm_link" child="wrist_link"
+                  xyz="-0.1349 0.0052 3.62355e-17" rpy="-1.41553e-15 4.91611e-15 -1.57"/>
+  <xacro:revolute name="wrist_roll" parent="wrist_link" child="gripper_link"
+                  xyz="0.0 -0.0611 0.0181" rpy="-1.57 3.14 0"/>
+  <xacro:revolute name="gripper" parent="gripper_link" child="jaw_link"
+                  xyz="0.0211297 0.0178087 -0.023398" rpy="1.57003 -0.000833172 -0.0470836"/>
+
+  <ros2_control name="so101" type="system">
+    <hardware>
+      <plugin>topic_based_ros2_control/TopicBasedSystem</plugin>
+      <param name="joint_commands_topic">$(arg joint_commands_topic)</param>
+      <param name="joint_states_topic">$(arg joint_states_topic)</param>
+      <!-- patches/topic_based_ros2_control: start the commands at the first joint state -->
+      <param name="initial_state_timeout">$(arg initial_state_timeout)</param>
+      <!-- and stop republishing a joint state the arm server has stopped sending -->
+      <param name="joint_state_timeout">$(arg joint_state_timeout)</param>
+      <param name="trigger_joint_command_threshold">$(arg trigger_joint_command_threshold)</param>
+    </hardware>
+    <xacro:macro name="arm_joint" params="name">
+      <joint name="${name}">
+        <command_interface name="position"/>
+        <state_interface name="position"/>
+      </joint>
+    </xacro:macro>
+    <xacro:arm_joint name="shoulder_pan"/>
+    <xacro:arm_joint name="shoulder_lift"/>
+    <xacro:arm_joint name="elbow_flex"/>
+    <xacro:arm_joint name="wrist_flex"/>
+    <xacro:arm_joint name="wrist_roll"/>
+    <joint name="gripper">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+  </ros2_control>
+</robot>

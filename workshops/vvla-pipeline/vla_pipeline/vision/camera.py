@@ -118,6 +118,28 @@ class DirectCamera(CameraClient):
             return False, None
         return True, frame
 
+    def retry_at(self) -> float | None:
+        """When :meth:`read` next tries to reopen a lost device (``time.time()``); None while it is open."""
+        return self._next_retry if self._cap is None else None
+
+    def read_after(self, settled_at: float) -> tuple[bool, np.ndarray | None]:
+        """Discard buffered frames until a read blocks for a new exposure.
+
+        ``settled_at`` is when the arm finished moving. A buffered frame
+        returns immediately; the frame that blocks for the next exposure was
+        captured after the move.
+        """
+        period = 1.0 / max(self._fps, 1.0)
+        ok, frame = False, None
+        for _ in range(8):
+            started = time.perf_counter()
+            ok, frame = self.read()
+            if not ok or frame is None:
+                return False, None
+            if time.perf_counter() - started >= 0.5 * period:
+                return True, frame
+        return bool(ok), frame
+
     def close(self) -> None:
         """Release the OpenCV capture device."""
         if self._cap is not None:
@@ -144,9 +166,10 @@ class Ros2Camera(CameraClient):
         if not rclpy.ok():
             rclpy.init()
         self._node = rclpy.create_node(f"camera_client_{role}")
-        self._lock = threading.Lock()
+        self._cond = threading.Condition()  # notified on every new frame, and on close
         self._frame: np.ndarray | None = None
         self._stamp = 0.0
+        self._closed = False
 
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -169,21 +192,72 @@ class Ros2Camera(CameraClient):
         )
         if msg.encoding == "rgb8":
             frame = frame[..., ::-1]
-        with self._lock:
+        with self._cond:
             self._frame = frame.copy()
             self._stamp = time.time()
+            self._cond.notify_all()
 
     def read(self) -> tuple[bool, np.ndarray | None]:
         """Return the latest frame if it isn't stale, else (False, None)."""
-        with self._lock:
+        with self._cond:
             if self._frame is None or (time.time() - self._stamp) > self._stale_after:
                 return False, None
             return True, self._frame
 
+    def read_after(self, settled_at: float) -> tuple[bool, np.ndarray | None]:
+        """First frame that arrives after ``settled_at``, within the stream's staleness limit."""
+        ok, frame, _arrived = self.next_frame(settled_at, max(self._stale_after, 0.5))
+        return ok, frame
+
+    def next_frame(self, after: float, timeout: float | None = None) -> tuple[bool, np.ndarray | None, float]:
+        """``(ok, frame, arrived)``: the first frame that arrives after ``after``;
+        not ok once closed, or when ``timeout`` passes first."""
+        with self._cond:
+            self._cond.wait_for(lambda: self._closed or (self._frame is not None and self._stamp > after), timeout)
+            if self._closed or self._frame is None or self._stamp <= after:
+                return False, None, after
+            return True, self._frame, self._stamp
+
     def close(self) -> None:
-        """Shut down the executor and destroy the subscriber node."""
+        """Wake a waiting reader, shut down the executor and destroy the subscriber node."""
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
         self._executor.shutdown()
         self._node.destroy_node()
+
+
+class SimCameraClient(CameraClient):
+    """A camera rendered by the in-process MuJoCo digital twin (``source: sim``).
+
+    Shares the process-wide twin with ``SimArmClient`` so the wrist camera
+    moves with the simulated arm. Over ROS 2 (``use_ros2: true``) the twin's
+    node publishes the same frames on the normal topic instead.
+    """
+
+    def __init__(self, cfg: dict, role: str):
+        from so101_sim import SimCamera
+
+        from vla_pipeline.robot.sim_arm import sim_world
+
+        self.role = role
+        self._cam = SimCamera(sim_world(cfg), role, blocking=True)
+
+    def read(self) -> tuple[bool, np.ndarray | None]:
+        """Next rendered frame (paced at the camera fps, like a V4L2 read)."""
+        return self._cam.read()
+
+    def read_after(self, settled_at: float) -> tuple[bool, np.ndarray | None]:
+        """Frame rendered after the arm finished moving at ``settled_at``."""
+        return self._cam.read_after(settled_at)
+
+    def ok(self) -> bool:
+        """Return True once the renderer has produced a frame."""
+        return self._cam.ok()
+
+    def close(self) -> None:
+        """Release this view of the twin's renderer."""
+        self._cam.release()
 
 
 def make_camera(cfg: dict, role: str) -> CameraClient:
@@ -201,6 +275,8 @@ def make_camera(cfg: dict, role: str) -> CameraClient:
         }
     if c.get("use_ros2", False):
         return Ros2Camera(role, c["topic"], stale_after_s=c.get("stale_after_s", 1.0))
+    if c.get("source", "device") == "sim":
+        return SimCameraClient(cfg, role)
     return DirectCamera(
         role,
         c.get("device", 0),

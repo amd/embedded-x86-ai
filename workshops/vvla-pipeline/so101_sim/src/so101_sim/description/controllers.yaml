@@ -1,0 +1,41 @@
+# ros2_control controllers for so101.urdf.xacro. The launch sets
+# controller_manager's update_rate from robot.control_fps. Two gripper
+# controllers are candidates: the forward one keeps the grasp loop in the
+# behaviors; the action one detects the stall from the gripper's velocity.
+controller_manager:
+  ros__parameters:
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+    arm_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+    arm_forward_controller:
+      type: position_controllers/JointGroupPositionController
+    gripper_forward_controller:
+      type: position_controllers/JointGroupPositionController
+    gripper_action_controller:
+      type: parallel_gripper_action_controller/GripperActionController
+
+arm_controller:
+  ros__parameters:
+    joints: [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll]
+    command_interfaces: [position]
+    state_interfaces: [position]
+    allow_partial_joints_goal: true
+    # A goal's own goal_tolerance says how close; this is how long after the
+    # trajectory's end the joints may take to get there. The streaming arm
+    # server settled within 53 ms on the twin (scripts/ros2_control_poc.py).
+    constraints:
+      goal_time: 0.1
+
+arm_forward_controller:
+  ros__parameters:
+    joints: [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll]
+
+gripper_forward_controller:
+  ros__parameters:
+    joints: [gripper]
+
+gripper_action_controller:
+  ros__parameters:
+    joint: gripper
+    allow_stalling: true

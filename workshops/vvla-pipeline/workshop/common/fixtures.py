@@ -66,15 +66,20 @@ class SyntheticCamera:
 
     role = "synthetic"
 
-    def __init__(self, width: int = 640, height: int = 480):
+    def __init__(self, width: int = 640, height: int = 480, fps: float = 30.0):
         import cv2
 
         self._cv2 = cv2
-        self.width, self.height = width, height
+        self.width, self.height, self.fps = width, height, fps
         self.frames = 0
+        self._next = 0.0
 
     def read(self):
         cv2 = self._cv2
+        now = time.monotonic()
+        if now < self._next:
+            time.sleep(self._next - now)
+        self._next = max(self._next + 1.0 / self.fps, time.monotonic())
         w, h = self.width, self.height
         t = self.frames
         self.frames += 1
@@ -104,6 +109,14 @@ class SyntheticCamera:
 # Scripted pose / hands (stand-ins for the NPU + MediaPipe models)
 # ----------------------------------------------------------------------------
 
+# One orbit of the scripted wrist, and one open-close cycle of the scripted pinch.
+SCRIPT_PERIOD_S = 2.0 * math.pi
+
+
+def _script_phase(t0: float) -> float:
+    """Radians into the scripted cycle since ``t0`` (``time.monotonic``)."""
+    return 2.0 * math.pi * (time.monotonic() - t0) / SCRIPT_PERIOD_S
+
 
 class ScriptedPose:
     """Drop-in for ``models.vision.PoseEstimator`` with a scripted person.
@@ -119,12 +132,11 @@ class ScriptedPose:
 
     def __init__(self, width: int = 640, height: int = 480):
         self.width, self.height = width, height
-        self._t = 0
+        self._t0 = time.monotonic()
 
     def infer(self, frame_bgr):
         h, w = frame_bgr.shape[:2]
-        self._t += 1
-        t = self._t / 25.0
+        t = _script_phase(self._t0)
         cx, cy = w * 0.5, h * 0.45
 
         # start fully invisible; only joints we place become visible
@@ -176,13 +188,12 @@ class ScriptedHands:
     """Drop-in for ``models.hands.HandTracker`` with a scripted pinch/roll."""
 
     def __init__(self):
-        self._t = 0
+        self._t0 = time.monotonic()
 
     def process(self, frame_bgr):
         from models.hands import HandObservation
 
-        self._t += 1
-        t = self._t / 30.0
+        t = _script_phase(self._t0)
         pinch = 0.75 + 0.65 * math.sin(t)  # oscillates open/closed
         obs = HandObservation(
             pinch=max(pinch, 0.0),
@@ -211,6 +222,7 @@ class ScriptedHands:
 
 _KEYWORD_ROUTES = [
     (r"\b(stop|halt|freeze|abort)\b", "stop", None),
+    (r"\b(release|open|drop)\b|\blet go\b", "release", None),
     (r"\b(copy|mirror|follow|mimic)\b", "gesture_mimic", None),
     (r"\b(block|cube)\b", "fetch_block", None),
     (r"\b(pick|grab|bring|fetch|get)\b", "pick_place", "OBJECT"),
@@ -229,6 +241,7 @@ _OBJECT_WORDS = (
     "apple",
     "banana",
     "book",
+    "toothbrush",
     "remote",
     "orange",
     "teddy",
@@ -312,17 +325,10 @@ class MockLlamaServer:
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
 
     def __enter__(self):
+        # The constructor bound and listens on the socket, so a request made now
+        # waits in its backlog until serve_forever accepts it.
         self._thread.start()
-        deadline = time.time() + 3.0
-        while time.time() < deadline:
-            try:
-                import urllib.request
-
-                urllib.request.urlopen(self.base_url + "/health", timeout=0.3)
-                return self
-            except Exception:
-                time.sleep(0.02)
-        raise RuntimeError("mock llama-server failed to start")
+        return self
 
     def __exit__(self, *exc):
         self._httpd.shutdown()

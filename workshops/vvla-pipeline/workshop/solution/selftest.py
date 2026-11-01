@@ -11,12 +11,13 @@
 One command to answer the question you actually care about: *is the only thing
 standing between me and the solution the TODOs I haven't written yet?*
 
-It does three things, all without a robot, an NPU, a GPU, ROS 2, or a webcam:
+It does three things, all without a robot, an NPU, a GPU, or a webcam. ROS 2
+is required (``source /opt/ros/jazzy/setup.bash``): component 2 runs on it.
 
 1. **TODO scan** - reads your source and lists which of the 21 TODOs are still
    stubs (the same checklist ``app.py`` shows on startup).
 2. **The three component harnesses** - runs ``models.selftest``,
-   ``ros.selftest --fake`` and ``integration.selftest`` and tallies every
+   ``ros.selftest`` and ``integration.selftest`` and tallies every
    PASS / FAIL / TODO / SKIP into one scoreboard. A FAIL means code you wrote
    does the wrong thing; a TODO means a stub you haven't filled in yet.
 3. **Solution parity (the oracle)** - runs those same three harnesses against
@@ -32,7 +33,6 @@ Verdict and exit code:
 
 Flags:
   --strict       treat remaining TODOs as failure (handy for CI / "am I done?")
-  --real-ros     use the real ROS 2 transport instead of the in-memory shim
   --no-solution  skip the solution oracle (e.g. you deleted solution/)
   --quiet        show only the scoreboards, not each harness's full output
 """
@@ -53,14 +53,11 @@ HERE = Path(__file__).resolve().parent  # this tree (project/ or solution/)
 _TALLY = re.compile(r"PASS\s+(\d+)\s+FAIL\s+(\d+)\s+TODO\s+(\d+)\s+SKIP\s+(\d+)")
 
 
-def _components(real_ros: bool):
-    """The (label, argv) for each component harness."""
-    ros_args = ["-m", "ros.selftest"] + ([] if real_ros else ["--fake"])
-    return [
-        ("Component 1  models       ", ["-m", "models.selftest"]),
-        ("Component 2  ros          ", ros_args),
-        ("Component 3  integration  ", ["-m", "integration.selftest"]),
-    ]
+_COMPONENTS = [
+    ("Component 1  models       ", ["-m", "models.selftest"]),
+    ("Component 2  ros          ", ["-m", "ros.selftest"]),
+    ("Component 3  integration  ", ["-m", "integration.selftest"]),
+]
 
 
 def _run_harness(argv, cwd: Path, echo: bool):
@@ -84,11 +81,11 @@ def _run_harness(argv, cwd: Path, echo: bool):
     return proc.returncode, p, f, t, s
 
 
-def _run_suite(cwd: Path, *, real_ros: bool, echo: bool):
+def _run_suite(cwd: Path, *, echo: bool):
     """Run all three harnesses in ``cwd``; return the summed (pass, fail, todo, skip)."""
     tot = [0, 0, 0, 0]
     rows = []
-    for label, argv in _components(real_ros):
+    for label, argv in _COMPONENTS:
         if echo:
             print(f"\n{'=' * 74}\n>>> {label.strip()}   ({' '.join(argv)})\n{'=' * 74}")
         _, p, f, t, s = _run_harness(argv, cwd, echo)
@@ -119,11 +116,6 @@ def main() -> int:
         help="exit nonzero if any TODO is still unimplemented",
     )
     ap.add_argument(
-        "--real-ros",
-        action="store_true",
-        help="use the real ROS 2 transport instead of the in-memory shim",
-    )
-    ap.add_argument(
         "--no-solution",
         action="store_true",
         help="skip the solution parity (oracle) check",
@@ -138,7 +130,7 @@ def main() -> int:
 
     print("=" * 74)
     print("  VVLA workshop - end-to-end self test")
-    print("  (no NPU / ROS 2 / GPU / camera needed - all backends are synthetic)")
+    print("  (ROS 2 required; no NPU / GPU / camera needed - those backends are synthetic)")
     print("=" * 74)
 
     # -- 1. static TODO scan ------------------------------------------------
@@ -151,7 +143,7 @@ def main() -> int:
         print("  every TODO is implemented - nice.")
 
     # -- 2. the three component harnesses on YOUR tree ----------------------
-    tot, rows = _run_suite(HERE, real_ros=args.real_ros, echo=echo)
+    tot, rows = _run_suite(HERE, echo=echo)
     _scoreboard("-- your scoreboard --", rows, tot)
     your_fail, your_todo = tot[1], tot[2]
 
@@ -163,7 +155,7 @@ def main() -> int:
             f"\n{'=' * 74}\n>>> solution parity (oracle): the same harnesses against "
             f"solution/\n{'=' * 74}"
         )
-        sol_tot, sol_rows = _run_suite(sol, real_ros=args.real_ros, echo=False)
+        sol_tot, sol_rows = _run_suite(sol, echo=False)
         _scoreboard("-- solution scoreboard --", sol_rows, sol_tot)
         oracle_ok = sol_tot[1] == 0 and sol_tot[2] == 0  # no FAIL, no TODO
         if oracle_ok:

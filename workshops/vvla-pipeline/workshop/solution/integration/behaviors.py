@@ -38,8 +38,8 @@ def run_dance(ctx, cmd=None, duration_s=None, seed=None) -> None:
     play each move's keyframes ×4 with ``ctx.arm.go_to(keyframe,
     duration_s=beat*0.9, stop_check=ctx.stop_check)``. Check the deadline
     AND ``ctx.stop_check()`` between keyframes - a dance that can't be
-    stopped is a safety bug, not a feature. Always park with
-    ``ctx.arm.go_to_rest()`` in a ``finally``.
+    stopped is a safety bug, not a feature. A stop holds the current pose;
+    an explicit ``home`` command parks the arm.
     """
     d = ctx.cfg.get("dance", {}) or {}
     # >>> TODO 3.4: run_dance - notebooks/03_integration/01_behavior.ipynb
@@ -67,8 +67,11 @@ def run_dance(ctx, cmd=None, duration_s=None, seed=None) -> None:
                     keyframe, duration_s=beat * 0.9, stop_check=ctx.stop_check
                 )
     finally:
-        logger.info("Dance over - bowing out to rest pose.")
-        ctx.arm.go_to_rest()
+        if ctx.stop_check():
+            logger.info("Dance stopped - holding position.")
+        else:
+            logger.info("Dance over - returning to rest pose.")
+            ctx.arm.go_to_rest(stop_check=ctx.stop_check)
     # <<< TODO 3.4
 
 

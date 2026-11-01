@@ -19,6 +19,9 @@
 # Source this AFTER activating the venv:
 #     source scripts/ryzen_ai_env.sh
 #
+# Every entry point sources it, so it also carries two settings for the whole
+# stack (at the end): llama.cpp's GPU target and the ROS 2 transport.
+#
 # Safe to source repeatedly.
 
 # Resolve the active venv (VIRTUAL_ENV is set by `source .venv/bin/activate`).
@@ -128,3 +131,10 @@ unset _RAI_VENV _RAI_SELF _RAI_PYVER _RAI_SP _RAI_CANDIDATES _d _RAI_XCLBIN_REL 
 # iGPU as gfx1100 so its HIP kernels load instead of segfaulting. Affects
 # only the ROCm/HIP GPU runtime - the XDNA2 NPU (VitisAI) is unaffected.
 export HSA_OVERRIDE_GFX_VERSION=11.0.0
+
+# ROS 2 camera images (640x480 bgr8, 0.9 MB each, 30 fps) between processes on
+# this machine. On Fast DDS's default transports, frames were lost for up to
+# 1.7 s at a time while the pipeline ran on the twin (a pick then said the arm
+# camera was offline); with its LARGE_DATA transports the longest gap was
+# 0.33 s. Every ROS process of the stack sources this file, so they all use it.
+export FASTDDS_BUILTIN_TRANSPORTS="${FASTDDS_BUILTIN_TRANSPORTS:-LARGE_DATA}"

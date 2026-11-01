@@ -12,11 +12,14 @@
 #   ./run_pipeline.sh                     # voice control, full hardware
 #   ./run_pipeline.sh --text-commands     # type commands instead of speaking
 #   ./run_pipeline.sh --dry-run           # no robot hardware
+#   ./run_pipeline.sh --digital-twin      # no robot hardware: MuJoCo twin of the arm,
+#                                         #   shown in the twin console window
 #   ./run_pipeline.sh --headless          # no preview windows
 #
-# When robot.use_ros2: true in config/pipeline.yaml, starts the SO-101 server
-# node AND both camera nodes (mount + arm) in the background - equivalent to
-# `ros2 launch launch/strix_vla.launch.py` - then runs the orchestrator.
+# Starts launch/strix_vla.launch.py in the background - the SO-101 server node
+# (or the digital twin) under ros2_control when robot.use_ros2: true in
+# config/pipeline.yaml, the camera nodes when a camera's use_ros2 is true - then
+# runs the orchestrator. Its arm client waits for the controllers to come up.
 set -eo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
@@ -61,19 +64,24 @@ PY
 ROBOT_ROS2="${USE_ROS2%% *}"
 CAMERA_ROS2="${USE_ROS2##* }"
 
-PIDS=()
+LAUNCH_PID=""
 cleanup() {
-  for pid in "${PIDS[@]}"; do
-    if kill -0 "$pid" 2>/dev/null; then
-      kill -INT "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
-    fi
-  done
+  # The launch runs in a session of its own: SIGINT to its process group reaches
+  # every node, so the arm server parks and each node exits. The launch itself,
+  # started as a background job with SIGINT ignored, ends when they have.
+  if [[ -n "$LAUNCH_PID" ]] && kill -0 "$LAUNCH_PID" 2>/dev/null; then
+    kill -INT -- "-$LAUNCH_PID" 2>/dev/null || true
+    wait "$LAUNCH_PID" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT
 
 DRY=""
-for a in "$@"; do [[ "$a" == "--dry-run" ]] && DRY="--dry-run"; done
+SIM=""
+for a in "$@"; do
+  [[ "$a" == "--dry-run" ]] && DRY="--dry-run"
+  [[ "$a" == "--digital-twin" ]] && SIM="--digital-twin"
+done
 
 # ---------------------------------------------------------------------------
 # One-time interactive calibration. The server node runs backgrounded (no TTY),
@@ -81,7 +89,7 @@ for a in "$@"; do [[ "$a" == "--dry-run" ]] && DRY="--dry-run"; done
 # calibrate() would hit EOF on input(). Detect it here and calibrate in the
 # FOREGROUND (this terminal) before starting any background processes.
 # ---------------------------------------------------------------------------
-if [[ -z "$DRY" ]]; then
+if [[ -z "$DRY" && -z "$SIM" ]]; then
   NEED_CAL="$(python - <<'PY'
 from vla_pipeline.utils.config import load_config
 from vla_pipeline.robot.arm_interface import calibration_exists
@@ -102,18 +110,17 @@ PY
   fi
 fi
 
-if [[ "$ROBOT_ROS2" == "true" ]]; then
-  echo "Starting SO-101 ROS 2 server node..."
-  python -m vla_pipeline.robot.robot_node --server $DRY &
-  PIDS+=($!)
+if [[ "$ROBOT_ROS2" == "true" || "$CAMERA_ROS2" == "true" ]]; then
+  command -v ros2 >/dev/null || { echo "ROS 2 not found - install ROS 2 Jazzy (/opt/ros/jazzy)." >&2; exit 1; }
+  # The twin hosts the arm server AND the arm camera (they share the physics).
+  TWIN=false
+  [[ -n "$SIM" && -z "$DRY" && "$ROBOT_ROS2" == "true" ]] && TWIN=true
+  DRY_ARM=false
+  [[ -n "$DRY" ]] && DRY_ARM=true
+  echo "Starting the ROS 2 nodes (arm: $ROBOT_ROS2, cameras: $CAMERA_ROS2, digital twin: $TWIN)..."
+  setsid python "$(command -v ros2)" launch launch/strix_vla.launch.py \
+    arm:="$ROBOT_ROS2" cameras:="$CAMERA_ROS2" digital_twin:="$TWIN" dry_run:="$DRY_ARM" &
+  LAUNCH_PID=$!
 fi
-if [[ "$CAMERA_ROS2" == "true" ]]; then
-  echo "Starting camera nodes (mount + arm)..."
-  python -m vla_pipeline.vision.camera_node --role mount &
-  PIDS+=($!)
-  python -m vla_pipeline.vision.camera_node --role arm &
-  PIDS+=($!)
-fi
-[[ ${#PIDS[@]} -gt 0 ]] && sleep 2
 
 python -m vla_pipeline.main "$@"

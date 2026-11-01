@@ -36,10 +36,8 @@ from __future__ import annotations
 
 import argparse
 import logging
-import queue
 import re
 import threading
-import time
 from dataclasses import dataclass, field
 
 from vla_pipeline.llm.intents import (
@@ -98,37 +96,45 @@ def _h_gesture_mimic(ctx: PipelineContext, cmd: ParsedCommand) -> None:
     if ctx.pose is None or ctx.mount_camera is None:
         ctx.say("Gesture mimic needs the mount camera and pose model.")
         return
+    if ctx.shared_state.pop("grip_lock", None):
+        ctx.shared_state.pop("grip_lock_pos", None)
+        ctx.say("Your pinch drives the gripper now. Open your fingers to let go.")
     run_gesture_mimic(
         ctx.cfg,
         ctx.arm,
         ctx.pose,
         ctx.hands,
         ctx.mount_camera,
-        shared_state=ctx.shared_state,
         stop_check=ctx.stop_check,
         show_preview=not ctx.headless,
     )
 
 
 @registry.register(Intent.FETCH_BLOCK)
-def _h_fetch_block(ctx: PipelineContext, cmd: ParsedCommand) -> None:
+def _h_fetch_block(ctx: PipelineContext, cmd: ParsedCommand) -> bool:
     """Dispatch to :func:`run_fetch_block`."""
     from vla_pipeline.behaviors.fetch_block import run_fetch_block
 
-    run_fetch_block(
-        ctx.cfg, ctx.arm, ctx.pose, ctx.mount_camera, stop_check=ctx.stop_check
+    return run_fetch_block(
+        ctx.cfg,
+        ctx.arm,
+        ctx.pose,
+        ctx.mount_camera,
+        stop_check=ctx.stop_check,
+        feedback=ctx.say,
+        stop_event=ctx.stop_event,
     )
 
 
 @registry.register(Intent.PICK_PLACE)
-def _h_pick_place(ctx: PipelineContext, cmd: ParsedCommand) -> None:
+def _h_pick_place(ctx: PipelineContext, cmd: ParsedCommand) -> bool:
     """Dispatch to :func:`run_pick_place` for the requested object."""
     from vla_pipeline.behaviors.pick_place import run_pick_place
 
     if ctx.detector is None:
         ctx.say("Object detection isn't available - can't do pick and place.")
-        return
-    run_pick_place(
+        return False
+    return run_pick_place(
         ctx.cfg,
         ctx.arm,
         ctx.detector,
@@ -150,6 +156,19 @@ def _h_dance(ctx: PipelineContext, cmd: ParsedCommand) -> None:
     run_dance(ctx.cfg, ctx.arm, stop_check=ctx.stop_check)
 
 
+@registry.register(Intent.RELEASE)
+def _h_release(ctx: PipelineContext, cmd: ParsedCommand) -> None:
+    """Dispatch to :func:`run_release`."""
+    from vla_pipeline.behaviors.grip import run_release
+
+    run_release(
+        ctx.arm,
+        shared_state=ctx.shared_state,
+        stop_check=ctx.stop_check,
+        feedback=ctx.say,
+    )
+
+
 @registry.register(Intent.GRIP)
 def _h_grip(ctx: PipelineContext, cmd: ParsedCommand) -> None:
     """Dispatch to :func:`run_grip`."""
@@ -162,6 +181,7 @@ def _h_grip(ctx: PipelineContext, cmd: ParsedCommand) -> None:
         stop_check=ctx.stop_check,
         arm_camera=ctx.arm_camera,
         feedback=ctx.say,
+        stop_event=ctx.stop_event,
     )
 
 
@@ -189,7 +209,7 @@ _STOP_RE = re.compile(r"\b(" + "|".join(STOP_KEYWORDS) + r")\b", re.IGNORECASE)
 
 
 def is_stop(transcript: str) -> bool:
-    """Return True if transcript contains a stop keyword."""
+    """True when the raw transcript contains a stop keyword."""
     return bool(_STOP_RE.search(transcript or ""))
 
 
@@ -236,6 +256,9 @@ DEFAULT_NOISE_PHRASES = (
 )
 
 
+_NON_SPEECH_TAG = re.compile(r"\[[^\]]*\]|\([^)]*\)|\*[^*]*\*")
+
+
 def _normalize_transcript(text: str) -> str:
     """Lowercase, strip surrounding whitespace and trailing punctuation/quotes."""
     return re.sub(r"[\s\.\,\!\?\"\'`]+$", "", (text or "").strip().lower()).strip()
@@ -256,7 +279,8 @@ def make_noise_gate(cfg: dict):
 
     def is_noise(text: str) -> bool:
         """Return True if text looks like noise/hallucination rather than a real command."""
-        norm = _normalize_transcript(text)
+        # Whisper tags non-speech as "[BLANK_AUDIO]", "(sighs)", "*music*" - drop those.
+        norm = _normalize_transcript(_NON_SPEECH_TAG.sub(" ", text or ""))
         if not norm:
             return True
         if not any(c.isalpha() for c in norm):
@@ -269,6 +293,15 @@ def make_noise_gate(cfg: dict):
 # =============================================================================
 # Orchestrator
 # =============================================================================
+
+
+def apply_sim_overrides(cfg: dict) -> dict:
+    """Switch ``cfg`` to the digital twin: sim arm + sim arm camera, real mount camera."""
+    cfg.setdefault("robot", {})["backend"] = "sim"
+    cams = cfg.setdefault("cameras", {})
+    cams.setdefault("arm", {})["source"] = "sim"
+    cams.setdefault("mount", {}).setdefault("source", "device")
+    return cfg
 
 
 def build_context(cfg: dict, args) -> PipelineContext:
@@ -293,6 +326,8 @@ def build_context(cfg: dict, args) -> PipelineContext:
     except Exception as e:
         logger.warning("Arm camera unavailable: %s", e)
 
+    # The arm and camera clients above have already started DDS. A Vitis AI
+    # session opened first leaves LARGE_DATA unable to discover peers.
     device = args.device
     try:
         from vla_pipeline.vision.yolo_pose_npu import PoseEstimator
@@ -335,25 +370,53 @@ def main() -> None:
         default=None,
         help="override the device for all ONNX models",
     )
+    parser.add_argument(
+        "--digital-twin",
+        action="store_true",
+        help="drive the MuJoCo digital twin instead of the real arm "
+        "(robot.backend=sim, arm camera rendered on the gripper)",
+    )
+    parser.add_argument(
+        "--no-console",
+        action="store_true",
+        help="with --digital-twin: skip the twin console window",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.digital_twin:
+        apply_sim_overrides(cfg)
     ensure_dirs(cfg)
     ctx = build_context(cfg, args)
 
-    is_noise = make_noise_gate(cfg)
+    console = None
+    if args.digital_twin and not (args.headless or args.no_console):
+        from vla_pipeline.console import TwinConsole
+
+        console = TwinConsole(ctx, voice="typed" if args.text_commands else "mic")
+
+    from vla_pipeline.dispatch import Dispatcher
+    from vla_pipeline.llm.llama_intent import LlamaIntentParser
+
+    llm = LlamaIntentParser(cfg)
     # Ignore any transcript for a short grace window after launch - the mic goes
     # hot before the user is ready and the first frames are usually room noise
     # that Whisper hallucinates into words. Voice ('stop' included) only starts
     # being honored once the window passes. Tunable via audio.startup_grace_s.
-    startup_grace_s = float((cfg.get("audio", {}) or {}).get("startup_grace_s", 1.5))
-    start_time = time.monotonic()
-
-    from vla_pipeline.llm.llama_intent import LlamaIntentParser
-
-    llm = LlamaIntentParser(cfg)
-    transcripts: queue.Queue[str] = queue.Queue()
+    # Typed commands have no mic, so they get no window.
+    grace_s = 0.0 if args.text_commands else float((cfg.get("audio", {}) or {}).get("startup_grace_s", 1.5))
+    dispatcher = Dispatcher(
+        ctx,
+        llm.parse,
+        registry,
+        is_stop=is_stop,
+        is_noise=make_noise_gate(cfg),
+        startup_grace_s=grace_s,
+    )
+    _on_transcript = dispatcher.on_transcript
     shutdown = threading.Event()
+    if console is not None:
+        console.attach(dispatcher)
 
     # ---------------- listener thread (always hot) ----------------
     if not args.text_commands:
@@ -368,6 +431,8 @@ def main() -> None:
             listener.run_forever(
                 on_transcript=lambda t: _on_transcript(t),
                 stop_check=shutdown.is_set,
+                on_level=console.on_level if console is not None else None,
+                on_busy=console.note_asr if console is not None else None,
             )
 
         threading.Thread(target=_listen, daemon=True, name="listener").start()
@@ -380,75 +445,32 @@ def main() -> None:
                     line = input("you> ")
                 except EOFError:
                     shutdown.set()
+                    dispatcher.stop()
                     break
                 if line.strip():
                     _on_transcript(line.strip())
 
         threading.Thread(target=_stdin_loop, daemon=True, name="stdin").start()
 
-    def _on_transcript(text: str) -> None:
-        """Handle one transcript: apply the startup grace window, the stop fast-path, and the noise gate, then queue it for dispatch."""
-        logger.info("Heard: %r", text)
-        # Startup grace: swallow the mic's first noisy moments so a hallucinated
-        # transcript can't dispatch a behavior before the user has spoken.
-        if time.monotonic() - start_time < startup_grace_s:
-            logger.info("Ignoring %r (startup grace period).", text)
-            return
-        if is_stop(text):
-            # Safety stop: bypass the LLM entirely and interrupt NOW.
-            ctx.say("Stopping.")
-            ctx.stop_event.set()
-            return
-        # Drop known silence-hallucination phrases before the LLM/grammar can
-        # coerce them into a real command (the spurious-startup-behavior fix).
-        if is_noise(text):
-            logger.info("Ignoring %r (noise/hallucination gate).", text)
-            return
-        transcripts.put(text)
-
-    # ---------------- dispatch loop (main thread) ----------------
+    # ---------------- dispatch loop (main thread, unless the console owns it) ----------------
     ctx.say(
         "Ready. Try: 'copy my movements', 'pick up the ball', 'wave', "
-        "'dance', 'hold this', 'go home' - or 'stop' at any time."
+        "'dance', 'hold this', 'go home' - or 'stop' at any time. "
+        "In the twin window: space stops, r resets the arm and the table."
     )
     try:
-        while not shutdown.is_set():
-            try:
-                text = transcripts.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            cmd = llm.parse(text)
-            if cmd.intent in (Intent.UNKNOWN, Intent.STOP):
-                if cmd.intent is Intent.UNKNOWN:
-                    ctx.say("I didn't catch a command in that.")
-                continue
-            handler = registry.get(cmd.intent)
-            if handler is None:
-                ctx.say(f"No behavior registered for '{cmd.intent.value}'.")
-                continue
-
-            ctx.stop_event.clear()
-            logger.info("=== %s %s ===", cmd.intent.value, cmd.params or "")
-            try:
-                handler(ctx, cmd)  # runs on the main thread (cv2 previews)
-            except Exception:
-                logger.exception("Behavior %s crashed - arm to rest.", cmd.intent.value)
-                try:
-                    ctx.arm.go_to_rest()
-                except Exception:
-                    pass
-            ctx.stop_event.clear()
-
-            # Seamless switching: drain queued commands except the newest, so
-            # a backlog of utterances doesn't replay stale behaviors.
-            newest = None
-            while True:
-                try:
-                    newest = transcripts.get_nowait()
-                except queue.Empty:
-                    break
-            if newest is not None:
-                transcripts.put(newest)
+        if console is None:
+            dispatcher.run(shutdown)
+        else:
+            worker = threading.Thread(
+                target=dispatcher.run, args=(shutdown,), daemon=True, name="dispatch"
+            )
+            worker.start()
+            console.run(shutdown, on_stop=lambda: _on_transcript("stop"))
+            shutdown.set()
+            ctx.stop_event.set()
+            dispatcher.stop()
+            worker.join(timeout=5.0)
     except KeyboardInterrupt:
         pass
     finally:
@@ -467,6 +489,10 @@ def main() -> None:
                 pass
         try:
             ctx.arm.close()
+            if args.digital_twin:
+                from so101_sim import close_shared_world
+
+                close_shared_world()
         finally:
             llm.close()
 

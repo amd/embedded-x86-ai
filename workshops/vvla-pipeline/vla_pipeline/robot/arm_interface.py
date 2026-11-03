@@ -499,10 +499,9 @@ class DirectArm(ArmClient):
     def read_motion_state(self) -> dict:
         """Each servo's ``Moving`` flag and the overload bit of its ``Status``.
 
-        Not yet checked on the real arm: whether the STS3215 sets ``Moving``
-        from the ``Goal_Position`` write until its profile ends (as the twin
-        does) or from its measured speed. If it is the speed, a wait must also
-        see the flag rise before it accepts it falling.
+        On the real STS3215, ``Moving`` follows the measured speed: it is still
+        clear on the read right after a ``Goal_Position`` write, so waits must
+        see it rise before they accept it falling (``SERVO_START_S``).
         """
         bus = self._robot.bus
         moving = self._bus_retry(lambda: bus.sync_read("Moving", normalize=False), "read Moving")
@@ -569,6 +568,11 @@ _EFFORT_EVERY_N_TICKS = 3
 # A goal is written on the owner's next tick and its servos report on the ones
 # after; this bound only catches an owner that has stopped reporting.
 OWNER_REPLY_S = 2.0
+# The STS3215 raises Moving from its measured speed, not from the Goal_Position
+# write, so the state read on the tick that wrote a goal still says "stopped".
+# A move is over once each joint has raised Moving and dropped it again; a joint
+# that never raises it within this window was already there, or is blocked.
+SERVO_START_S = 0.1
 
 
 class BusOwnerArm(ArmClient):
@@ -660,10 +664,17 @@ class BusOwnerArm(ArmClient):
             )
             if not written:
                 raise MotionTimeout(f"the bus owner did not write the goal within {OWNER_REPLY_S:.1f} s")
+            written_at = self._state["t"]
+            started: set = set()
+
+            def finished() -> bool:
+                started.update(j for j in joints if self._state["moving"].get(j))
+                if not settled(self._state, joints):
+                    return False
+                return started >= set(joints) or self._state["t"] - written_at >= SERVO_START_S
+
             budget = float(self._state["eta_s"]) + OWNER_REPLY_S
-            done = self._cond.wait_for(
-                lambda: bool(stop_check and stop_check()) or settled(self._state, joints), budget,
-            )
+            done = self._cond.wait_for(lambda: bool(stop_check and stop_check()) or finished(), budget)
             if stop_check and stop_check():
                 return "stopped", report()
             if not done:

@@ -210,7 +210,8 @@ def main():
                 continue
             cur_off = decode_sign_magnitude(cur_off)
 
-            raw_at_home = present + cur_off
+            # Wrap: a joint whose current offset straddles 0/4095 sums outside the encoder.
+            raw_at_home = (present + cur_off) % (ENCODER_MAX + 1)
             homing_new = raw_at_home - HALF_TURN
             range_min, range_max = ref_ranges[name]  # copied directly
 

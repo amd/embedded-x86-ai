@@ -422,9 +422,29 @@ class DirectArm(ArmClient):
         if hasattr(config, "disable_torque_on_disconnect"):
             config.disable_torque_on_disconnect = False
         self._robot = SO101Follower(config)
+        self._robot.configure = self._holding_in_place(self._robot.configure)
         self._robot.connect()
         logger.info("SO101Follower connected on %s (id=%s)", port, robot_id)
         self._init_transport(max_relative_target)
+
+    def _holding_in_place(self, configure):
+        """LeRobot's ``configure``, after making each servo's goal the position it is at.
+
+        ``configure`` ends by enabling torque, and a servo with torque drives
+        to the Goal_Position it last held, at full speed. After the arm was
+        moved by hand that goal is somewhere else (the rig's shoulder would
+        have swung ~110 deg). Goal_Velocity is SRAM too: clearing it removes a
+        cap a direct-goal run left, which would throttle the streaming server.
+        """
+        def run() -> None:
+            bus = self._robot.bus
+            here = self._bus_retry(lambda: bus.sync_read("Present_Position", normalize=False), "read positions")
+            self._bus_retry(lambda: bus.sync_write("Goal_Position", here, normalize=False), "hold positions")
+            uncapped = dict.fromkeys(here, 0)
+            self._bus_retry(lambda: bus.sync_write("Goal_Velocity", uncapped, normalize=False), "clear speed caps")
+            configure()
+
+        return run
 
     def _init_transport(self, max_relative_target) -> None:
         """State shared by this transport and the twin's (``SimArmClient``)."""

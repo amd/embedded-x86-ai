@@ -59,6 +59,13 @@ BODY = tuple(MOTOR_NAMES[:5])
 # controller manager or arm server that is gone. It is the hardware side's
 # joint-state silence bound, so the two cannot drift apart.
 REPLY_S = JOINT_STATE_STALE_S
+# The joints that hold the arm up stop short of a goal under gravity: the
+# real arm's elbow ended 2.5-3.4 deg low on the dance's pump. Their goal
+# tolerance is at least this, so that sag is not reported as a blocked move.
+SAG_TOLERANCE_DEG = {"shoulder_lift": 4.0, "elbow_flex": 4.0}
+# On the real arm a joint reached its goal about this long after its distance
+# at robot.max_speed_deg_s (the time to get up to that speed).
+SPEED_RAMP_S = 0.25
 
 
 class ControllerArm(ArmClient):
@@ -102,6 +109,8 @@ class ControllerArm(ArmClient):
         # tick while still; below one and a half of those the jaw has stopped.
         self._jaw_still_rad_s = 1.5 * self._jmap.steps_to_rad("gripper", 1.0) * control_fps
         self._goal_time_s = goal_time_s()
+        r = cfg["robot"]
+        self._max_speed = dict(r.get("max_speed_deg_s") or {}) if r.get("backend", "real") == "real" else {}
         self._FollowJointTrajectory = FollowJointTrajectory
         self._SwitchController = SwitchController
         self._Float64MultiArray = Float64MultiArray
@@ -273,6 +282,11 @@ class ControllerArm(ArmClient):
                 start = self.get_joints()
                 body = {k: v for k, v in target.items() if k in BODY}
                 eta_s = float(shared_profiler().plan(start, body or target).eta_s)
+                # The planner models the twin; the real arm's joints top out lower.
+                eta_s = max([eta_s, *(
+                    abs(v - start[k]) / self._max_speed[k] + SPEED_RAMP_S
+                    for k, v in body.items() if k in self._max_speed
+                )])
                 sent_at = time.time()
                 if "gripper" in target:
                     self._command_gripper(target["gripper"])
@@ -288,7 +302,7 @@ class ControllerArm(ArmClient):
                     )
                     goal.trajectory.points = [point]
                     goal.goal_tolerance = [
-                        JointTolerance(name=k, position=math.radians(tolerance_deg))
+                        JointTolerance(name=k, position=math.radians(max(tolerance_deg, SAG_TOLERANCE_DEG.get(k, 0.0))))
                         for k in body
                     ]
                     how = self._run(goal, eta_s, stop_check)

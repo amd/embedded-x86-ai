@@ -114,6 +114,10 @@ robot:
                                # config): commands are absolute goals and the
                                # servo's onboard profile produces the motion -
                                # exactly how gesture_mimic drives the arm
+  # Real arm only (ignored when backend: sim): each joint's top speed (deg/s)
+  # under the streaming arm server, measured on the rig. The ROS 2 arm client
+  # stretches a trajectory so no joint is planned faster than this.
+  max_speed_deg_s: {shoulder_pan: 85.0, shoulder_lift: 100.0, elbow_flex: 67.0, wrist_flex: 85.0, wrist_roll: 87.0}
   command_topic: /so101/joint_command
   state_topic: /so101/joint_state
 

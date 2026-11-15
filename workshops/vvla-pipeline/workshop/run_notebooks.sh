@@ -18,8 +18,9 @@
 #   2. Installs ONLY the dependencies that are missing (never clobbers an
 #      existing Ryzen AI onnxruntime; pins the versions the notebooks need,
 #      notably mediapipe 0.10.21 and numpy<2).
-#   3. Registers the "vvla-workshop" Jupyter kernel if it doesn't exist
-#      (the notebooks select it automatically).
+#   3. Registers the "vvla-workshop" Jupyter kernel for this clone on every
+#      launch (scripts/install_kernel.sh --register-only). That kernel.json is
+#      shared by every clone on this machine, so a launch must rewrite it.
 #   4. Sources ROS 2 (required) so the notebook kernel gets rclpy + DDS.
 #   5. scripts/ensure_voice.sh (sourced above the Jupyter launch) starts the
 #      Gemma 4 llama-server. This script does not start a second model.
@@ -29,7 +30,7 @@
 #
 # Usage:
 #   ./run_notebooks.sh                 # set up + launch Jupyter Lab (+ HUD)
-#   ./run_notebooks.sh --force-kernel  # re-register the kernel
+#   ./run_notebooks.sh --force-kernel  # uninstall the kernel, then register it
 #   ./run_notebooks.sh --no-launch     # set everything up, don't start Jupyter
 #   ./run_notebooks.sh --classic       # use `jupyter notebook` instead of lab
 #   ./run_notebooks.sh --no-monitor    # don't open the resource HUD
@@ -202,25 +203,18 @@ elif [[ "$LAUNCHER" == "lab" ]] && ! "$PY" -c 'import jupyterlab' 2>/dev/null; t
   pip_install "jupyterlab>=4.0"
 fi
 
-# --- 3. Register the kernel if it doesn't already exist ---------------------
-_KERNEL_CHECK='import sys
-try:
-    from jupyter_client.kernelspec import KernelSpecManager
-    sys.exit(0 if sys.argv[1] in KernelSpecManager().find_kernel_specs() else 1)
-except Exception:
-    sys.exit(1)'
-kernel_exists() { "$PY" -c "$_KERNEL_CHECK" "$KERNEL_NAME" 2>/dev/null; }
-
+# --- 3. Register this clone's kernel on every launch ------------------------
+# scripts/install_kernel.sh owns kernel.json. --register-only rewrites the
+# shared spec from this tree and does not start the voice server or the NPU
+# preflight, which the steps above already ran. ipykernel install resets the
+# launcher command, so the bringup prefix is applied after that returns.
+KERNEL_ARGS=(--register-only --no-vscode)
 if [[ "$FORCE_KERNEL" -eq 1 ]]; then
-  "$PY" -m jupyter kernelspec uninstall -y "$KERNEL_NAME" >/dev/null 2>&1 || true
+  KERNEL_ARGS+=(--force)
 fi
-if [[ "$FORCE_KERNEL" -eq 1 ]] || ! kernel_exists; then
-  say "Registering kernel '${KERNEL_NAME}' (${KERNEL_DISPLAY})"
-  "$PY" -m ipykernel install --user --name "$KERNEL_NAME" --display-name "$KERNEL_DISPLAY"
-fi
+"${REPO_ROOT}/scripts/install_kernel.sh" "${KERNEL_ARGS[@]}"
 # Both entry scripts run python -m so101_sim.bringup. This kernel does it
-# before any cell, so a Vitis session cannot start first. The installed
-# spec's env (ROS, NPU libs) stays; only the command changes.
+# before any cell, so a Vitis session cannot start first.
 KERNEL_JSON="${HOME}/.local/share/jupyter/kernels/${KERNEL_NAME}/kernel.json"
 "$PY" - "$KERNEL_JSON" <<'PY'
 import json, sys

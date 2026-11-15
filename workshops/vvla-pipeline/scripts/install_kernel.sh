@@ -33,6 +33,7 @@
 #   ./scripts/install_kernel.sh              # kernel + env bake + Gemma voice models
 #   ./scripts/install_kernel.sh --force      # reinstall the kernelspec too
 #   ./scripts/install_kernel.sh --no-vscode  # don't write .vscode/settings.json
+#   ./scripts/install_kernel.sh --register-only  # this clone's kernel.json only
 #   WITH_ROS_ENV=0 ./scripts/install_kernel.sh   # don't bake ROS 2 into kernel
 # =============================================================================
 set -euo pipefail
@@ -61,6 +62,14 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 say "Using venv python: $PY"
 
+# --register-only rewrites this clone's kernel.json and stops. workshop/run_notebooks.sh
+# calls that on every launch: the kernelspec is per user, so the last clone to
+# start would otherwise leave its venv and NPU paths in the shared file.
+# run_notebooks.sh has already installed ipykernel, ROS 2, and the voice models.
+REGISTER_ONLY=0
+[[ " $* " == *" --register-only "* ]] && REGISTER_ONLY=1
+
+if [[ "$REGISTER_ONLY" -eq 0 ]]; then
 # 2. Make sure ipykernel + ipywidgets live INSIDE the venv.
 #    (uv-created venvs may lack pip; fall back to uv or ensurepip.)
 if ! "$PY" -m pip --version >/dev/null 2>&1; then
@@ -115,6 +124,7 @@ if [ "$MP_RC" -eq 2 ]; then
         say "WARNING: mediapipe still fails after the pin - try: $PY -m pip install --upgrade mediapipe"
     fi
 fi
+fi
 
 # 3. Register the venv as a user kernelspec (idempotent; --force reinstalls).
 if [[ " $* " == *" --force "* ]]; then
@@ -140,8 +150,10 @@ print(KernelSpecManager().get_kernel_spec(sys.argv[1]).resource_dir)
 PYEOF
 )"
 KERNEL_JSON="${KERNEL_DIR}/kernel.json"
-VENV_DIR="$VENV_DIR" "${REPO_ROOT}/scripts/ensure_ros2_control.sh"
-VENV_DIR="$VENV_DIR" "${REPO_ROOT}/scripts/ensure_voice.sh"
+if [[ "$REGISTER_ONLY" -eq 0 ]]; then
+    VENV_DIR="$VENV_DIR" "${REPO_ROOT}/scripts/ensure_ros2_control.sh"
+    VENV_DIR="$VENV_DIR" "${REPO_ROOT}/scripts/ensure_voice.sh"
+fi
 say "Baking runtime env into ${KERNEL_JSON}"
 
 # Capture the env in a subshell that sources the same scripts run_notebooks.sh
@@ -186,6 +198,11 @@ print("    baked %d env vars: %s" % (len(env), ", ".join(sorted(env))))
 PYEOF
 else
     say "    (nothing to bake - ryzen_ai_env.sh / ROS produced no vars)"
+fi
+
+if [[ "$REGISTER_ONLY" -eq 1 ]]; then
+    say "Kernel '${KERNEL_NAME}' registered for this clone: ${KERNEL_JSON}"
+    exit 0
 fi
 
 # 3c. Point VS Code's Python extension at the venv and stop it from filtering

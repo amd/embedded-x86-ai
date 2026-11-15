@@ -31,7 +31,7 @@ import cv2
 import numpy as np
 
 from vla_pipeline.utils.config import load_config
-from vla_pipeline.utils.npu_session import build_session, size_npu
+from vla_pipeline.utils.npu_session import build_session, run_session, size_npu
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +160,7 @@ class PoseEstimator:
         """
         conf = self.conf_threshold if conf is None else conf
         nchw, info = letterbox(frame_bgr, self.imgsz)
-        outputs = self.session.run(None, {self.input_name: nchw})
+        outputs = run_session(self.session, None, {self.input_name: nchw})
 
         preds, raw = head_rows(outputs[0], 57)
         if raw:

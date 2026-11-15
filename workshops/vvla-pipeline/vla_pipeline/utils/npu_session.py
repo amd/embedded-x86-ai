@@ -27,6 +27,7 @@ Notes for Ryzen AI SW 1.7.1 on Linux (Strix Halo / XDNA2):
 from __future__ import annotations
 
 import logging
+import signal
 from pathlib import Path
 
 import onnxruntime as ort
@@ -176,3 +177,27 @@ def build_session(
         )
     logger.info("%s active provider: %s", onnx_path.name, active_provider(session))
     return session
+
+
+# The notebook kernel defers SIGINT across one NPU run so a stop click does not
+# abort the driver. The pipeline leaves this false: Ctrl-C must kill that process.
+defer_sigint = True
+
+
+def run_session(session, output_names, feeds):
+    """Run one ONNX session and return its outputs.
+
+    With :data:`defer_sigint` set, SIGINT stays pending until this call returns
+    and the caller then stops at the next Python statement. Delivered into the
+    NPU driver's wait, that signal aborts the hardware run
+    (``qds_device::wait() unexpected command state``) and the session is dead
+    afterwards. The pipeline turns deferral off so Ctrl-C still ends the process
+    during a run.
+    """
+    if not defer_sigint:
+        return session.run(output_names, feeds)
+    blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+    try:
+        return session.run(output_names, feeds)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, blocked)

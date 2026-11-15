@@ -394,6 +394,11 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
 
 def main() -> None:
     """Parse CLI args, build the pipeline context, and run the listen/dispatch loop until interrupted."""
+    # Ctrl-C must kill this process even during an NPU run. The notebook kernel
+    # keeps the default, which defers that signal until the run returns.
+    from vla_pipeline.utils import npu_session
+
+    npu_session.defer_sigint = False
     logging.basicConfig(
         level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
     )

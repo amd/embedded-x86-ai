@@ -36,7 +36,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from vla_pipeline.utils.config import load_config
-from vla_pipeline.utils.npu_session import build_session, size_npu
+from vla_pipeline.utils.npu_session import build_session, run_session, size_npu
 from vla_pipeline.vision.yolo_pose_npu import head_rows, letterbox, nms_keep, xywh_to_xyxy
 
 logger = logging.getLogger(__name__)
@@ -223,7 +223,7 @@ class ObjectDetector:
         """Run detection on one frame and return all detections above the confidence threshold."""
         conf = self.conf_threshold if conf is None else conf
         nchw, info = letterbox(frame_bgr, self.imgsz)
-        preds, raw = head_rows(self.session.run(None, {self.input_name: nchw})[0], 6)
+        preds, raw = head_rows(run_session(self.session, None, {self.input_name: nchw})[0], 6)
         if raw:
             boxes = xywh_to_xyxy(preds[:, :4])
             scores, classes = preds[:, 4:].max(axis=1), preds[:, 4:].argmax(axis=1)

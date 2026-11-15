@@ -349,124 +349,66 @@ The pipeline and the workshop each keep their own copy of the arm layer, the ser
 
 ## Installation
 
-Install the NPU driver, confirm the driver sees the NPU, then install Ryzen AI Software 1.7.1, then this repository. The driver steps match [Linux Installation Instructions](https://ryzenai.docs.amd.com/en/1.7.1/linux.html) and [workshops/ryzen-ai-always-on/README.md](../ryzen-ai-always-on/README.md).
-
-Ubuntu 24.04 LTS, kernel 6.10 or newer, Python 3.12, 64 GB of RAM recommended. The NPU PCI id is `1022:17f0`. If that search prints nothing, stop.
-
-```bash
-sudo apt update
-sudo apt install -y python3.12 python3.12-venv libboost-filesystem1.74.0 dkms
-lspci -nn | grep 1022:17f0
-```
+Ubuntu 24.04, kernel 6.10 or newer, Python 3.12. 64 GB of RAM is recommended. Three stages: the NPU driver, Ryzen AI Software 1.7.1, then this repository. Driver details match the [Ryzen AI 1.7.1 Linux instructions](https://ryzenai.docs.amd.com/en/1.7.1/linux.html).
 
 Download both packages from the Ryzen AI Software downloads page:
 
 - [NPU drivers, `RAI_1.7.1_Linux_NPU_XRT.zip`](https://account.amd.com/en/forms/downloads/xef.html?filename=RAI_1.7.1_Linux_NPU_XRT.zip)
 - [Ryzen AI Software, `ryzen_ai-1.7.1.tgz`](https://account.amd.com/en/forms/downloads/xef.html?filename=ryzen_ai-1.7.1.tgz)
 
-Install the four driver packages. The zip may unpack into a subdirectory, so the `find` lands in the directory that holds the `.deb` files. `xrt-smi examine` must list a device under `Device(s) Present`. The name depends on the machine (`RyzenAI-npu5`, `NPU Strix`, `NPU Strix Halo`). If the table is empty, stop. Do not compile a model yet.
+### 1. NPU driver
+
+The NPU PCI id is `1022:17f0`. If that search prints nothing, stop. The zip may unpack into a subdirectory, so `find` lands in the directory that holds the `.deb` files. `xrt-smi examine` must list a device (`RyzenAI-npu5`, `NPU Strix`, or `NPU Strix Halo`). If the table is empty, stop.
 
 ```bash
+sudo apt update
+sudo apt install -y python3.12 python3.12-venv libboost-filesystem1.74.0 dkms
+lspci -nn | grep 1022:17f0
 cd ~/Downloads
 unzip -o RAI_1.7.1_Linux_NPU_XRT.zip -d RAI_1.7.1_Linux_NPU_XRT
 cd "$(dirname "$(find RAI_1.7.1_Linux_NPU_XRT -name 'xrt_202610.2.21.75_24.04-amd64-base.deb' -print -quit)")"
-sudo apt install --fix-broken -y ./xrt_202610.2.21.75_24.04-amd64-base.deb
-sudo apt install --fix-broken -y ./xrt_202610.2.21.75_24.04-amd64-base-dev.deb
-sudo apt install --fix-broken -y ./xrt_202610.2.21.75_24.04-amd64-npu.deb
-sudo apt install --fix-broken -y ./xrt_plugin.2.21.260102.53.release_24.04-amd64-amdxdna.deb
+sudo apt install --fix-broken -y \
+  ./xrt_202610.2.21.75_24.04-amd64-base.deb \
+  ./xrt_202610.2.21.75_24.04-amd64-base-dev.deb \
+  ./xrt_202610.2.21.75_24.04-amd64-npu.deb \
+  ./xrt_plugin.2.21.260102.53.release_24.04-amd64-amdxdna.deb
 export LD_LIBRARY_PATH="/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
 source /opt/xilinx/xrt/setup.sh
 xrt-smi examine
 ```
 
-Unpack the software installer into `~/ryzen_ai-1.7.1` and create its virtual environment there. `quicktest.py` compiles a small CNN and runs it on the NPU. It prints `Test Finished`. The provider list must include `VitisAIExecutionProvider`.
+### 2. Ryzen AI Software
+
+This creates `~/ryzen_ai-1.7.1/venv`. Do not unpack the SDK inside this repository. `venv/quicktest/quicktest.py` is the SDK's own NPU check: it compiles a small CNN and prints `Test Finished`, and the provider list includes `VitisAIExecutionProvider`.
 
 ```bash
 mkdir -p ~/ryzen_ai-1.7.1
 cd ~/ryzen_ai-1.7.1
 tar -xvzf ~/Downloads/ryzen_ai-1.7.1.tgz
 ./install_ryzen_ai.sh -a yes -p $PWD/venv
-source /opt/xilinx/xrt/setup.sh
-source $PWD/venv/bin/activate
-python -c "import onnxruntime as ort; print(ort.get_available_providers())"
-cd venv/quicktest && python quicktest.py
-deactivate
 ```
 
-`$PWD/venv` is `~/ryzen_ai-1.7.1/venv`. Then clone this repository once. The NPU compile cache is not in git. Ultralytics is AGPL-3.0, so `./bootstrap.sh` does not install it or export the YOLO ONNX files. Export them with `scripts/export_yolo26s_pose.py` and `scripts/export_yolo26s_detect.py`, then compile:
+### 3. This repository
+
+Clone once. Do not clone this repository again inside the workshop. Ultralytics is AGPL-3.0, so `./bootstrap.sh` does not install it or export the YOLO ONNX files. The first bootstrap passes `--skip-compile` because those files do not exist yet. The second one compiles them.
 
 ```bash
 git clone https://github.com/amd/embedded-x86-ai
-export RYZEN_AI_WHEELS=~/ryzen_ai-1.7.1
 cd embedded-x86-ai/workshops/vvla-pipeline
+export RYZEN_AI_WHEELS=~/ryzen_ai-1.7.1
 ./bootstrap.sh --skip-compile
 source .venv/bin/activate
 pip install 'ultralytics' 'onnxslim>=0.1.82' 'numpy==1.26.4' 'opencv-contrib-python==4.11.0.86'
 python scripts/export_yolo26s_pose.py
 python scripts/export_yolo26s_detect.py
-deactivate
 ./bootstrap.sh --skip-apt --skip-llama --skip-models
-source .venv/bin/activate
-source scripts/ryzen_ai_env.sh
 ```
 
-The first `bootstrap.sh` creates `.venv` and downloads the Gemma 4 GGUF, its audio projector, and Silero. `--skip-compile` is only for that pass, because the YOLO ONNX files do not exist yet. The `pip install` and the two `scripts/export_yolo26s_*.py` commands export the YOLO ONNX files. The second `bootstrap.sh` compiles YOLO-pose and YOLO-detect into `cache/` for the NPU. Those `.rai` files stay on the machine. Do not clone this repository again inside the workshop, and do not unpack the SDK into the repository.
+`./bootstrap.sh` installs the apt packages, ROCm, the `.venv`, the ROCm PyTorch wheels, LeRobot, and llama.cpp with HIP (gfx1100 on Strix). It downloads the Gemma 4 E4B GGUF and its audio projector with `hf download` from `ggml-org/gemma-4-E4B-it-GGUF`, and Silero VAD v6.2.3, through `scripts/ensure_voice.sh`. It installs ROS 2 Jazzy when it is absent, plus ros2_control, the controllers, and `topic_based_ros2_control` 0.3.0 with the patches in `patches/topic_based_ros2_control/`, and builds that into `ros_ws/`. The second run writes `cache/yolo26s_pose_fp32/` and `cache/yolo26s_detect_fp32/` (about 16 minutes and 3 minutes). `./run_pipeline.sh` sources the venv, ROS 2, and `scripts/ryzen_ai_env.sh`.
 
-The NPU compile takes about 20 minutes on a Ryzen AI APU with Ryzen AI SW 1.7.1. YOLOv26s-pose took about 16 minutes and YOLOv26s-detect about 3 minutes. Once `cache/` holds a model's `.rai`, later sessions load it in about a second.
+`cache/` is not in git and does not copy to another machine: a cache from a different compiler loads and then mis-detects (`recompile model with latest VAIML version`). Delete the two directories above and run the second bootstrap again on this machine. To rebuild one model, remove its directory and run `scripts/compile_npu_models.sh --only yolo_pose` (or `yolo_detect`). When those `.rai` files were already compiled here, skip the export and the second bootstrap: `./bootstrap.sh --skip-compile` is the whole repository step. Other flags are `--skip-apt`, `--skip-llama`, `--skip-models`, and `--cpu-only`.
 
-A cache built on another machine, or with an older compiler than this driver, loads and then mis-detects. The runtime says `recompile model with latest VAIML version`. Delete `cache/yolo26s_pose_fp32` and `cache/yolo26s_detect_fp32` and compile again on this machine. Do not copy `cache/` between machines.
-
-When `cache/` already contains `.rai` files compiled on this machine with this driver, skip the export and the compile:
-
-```bash
-export RYZEN_AI_WHEELS=~/ryzen_ai-1.7.1
-./bootstrap.sh --skip-compile
-```
-
-`bootstrap.sh`:
-
-1. apt build deps (ffmpeg, cmake, portaudio, libav*, …)
-2. **uv venv at `./.venv`** with `--system-site-packages` (so ROS 2 Jazzy's `rclpy` stays importable)
-3. PyTorch `2.11.0+rocm7.13.0` from the AMD wheel index for the detected GPU, installed before the other Python deps. The PyPI torch wheel is not installed: it downloads the NVIDIA CUDA stack (`nvidia-cublas`, `nvidia-cudnn-cu13`).
-4. Python deps from `requirements.txt`, with that torch build pinned so a later resolver cannot replace it
-5. Ryzen AI onnxruntime (VitisAI EP) from `$RYZEN_AI_WHEELS`
-6. LeRobot 0.5.2 `[feetech]` from source → `third_party/lerobot`
-7. llama.cpp HIP build (`-DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1100`, `llama-server`) → `third_party/llama.cpp`
-8. Model downloads via `scripts/ensure_voice.sh`: Gemma 4 E4B-IT Q4_0 GGUF and its audio projector from `ggml-org/gemma-4-E4B-it-GGUF`, and Silero VAD v6.2.3. Gemma listens on port 8082. YOLO ONNX is exported with `python scripts/export_yolo26s_pose.py` and `python scripts/export_yolo26s_detect.py` (see the install steps above).
-9. ROS 2 Jazzy (installed if absent; required), ros2_control and the controllers, and `topic_based_ros2_control` 0.3.0 with the patches in `patches/topic_based_ros2_control/`, built into `ros_ws/`
-
-Flags: `--skip-apt`, `--skip-llama`, `--skip-models`, `--skip-compile`,
-`--cpu-only` (dev machine without ROCm/NPU). `--skip-compile` skips the NPU build. Use it on the first pass above, and again when `cache/*.rai` is already present. The compile pass omits `--skip-compile` and writes `cache/`.
-
-> **Note:** `scripts/ensure_voice.sh` downloads `gemma-4-E4B-it-Q4_0.gguf`, `mmproj-gemma-4-E4B-it-Q8_0.gguf`, and checks Silero against its sha256. `./bootstrap.sh` calls it with `--models-only` and builds `llama-server` itself.
-
-### NPU cache
-
-`cache/` is gitignored. The second `bootstrap.sh` above builds it (YOLO-pose about 16 minutes, YOLO-detect about 3 minutes):
-
-```text
-cache/yolo26s_pose_fp32/yolo26s_pose_fp32.rai
-cache/yolo26s_detect_fp32/yolo26s_detect_fp32.rai
-```
-
-Rebuild one model by removing its directory and compiling that family again:
-
-```bash
-rm -rf cache/yolo26s_pose_fp32
-export RYZEN_AI_WHEELS=~/ryzen_ai-1.7.1
-scripts/compile_npu_models.sh --only yolo_pose
-```
-
-**Run from the deployment venv** — Python packages come from `.venv`, compiled models come from `cache/`, and native runtime libraries come from the Ryzen AI install.
-
-**Check the NPU, then the voice models.** `scripts/verify_npu_stack.py --preflight` confirms the VitisAI provider. `scripts/ensure_voice.sh` confirms the Gemma GGUF, the audio projector, Silero, and a `llama-server` built with Gemma 4 audio.
-
-```bash
-source .venv/bin/activate
-source scripts/ryzen_ai_env.sh
-python scripts/verify_npu_stack.py --preflight
-scripts/ensure_voice.sh
-```
+`scripts/verify_npu_stack.py --preflight` confirms the VitisAI provider. `scripts/ensure_voice.sh` confirms the Gemma GGUF, the audio projector, Silero, and a `llama-server` built with Gemma 4 audio.
 
 ### Robot prerequisites (hardware runs only)
 

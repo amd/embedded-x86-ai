@@ -5,12 +5,12 @@
 # Portions of this file consist of AI-generated content. AI-assisted
 # content has been reviewed and validated by the authors.
 
-"""bootstrap.sh asks scripts/dep_pins.sh whether huggingface-hub can stay.
+"""bootstrap.sh asks scripts/dep_pins.sh which LeRobot tag to check out.
 
-LeRobot v0.5.0 and later require numpy 2 and huggingface-hub 1.x. An unpinned
-clone resolved to 0.7.1, which installed hub 2.4.0. The old check treated every
-version other than 1.x as acceptable, so 2.4.0 was logged OK and the
-transformers import then failed.
+The ROCm wheel is torchvision 0.26.0. No LeRobot release accepts that wheel
+together with numpy below 2 and huggingface-hub below 1.0. v0.6.0 is installed
+with --no-deps. An unpinned clone resolved to 0.7.1 and hub 2.4.0, and the
+old hub check logged 2.4.0 as OK.
 """
 
 from __future__ import annotations
@@ -39,8 +39,24 @@ def _call(function: str, arg: str = "") -> str:
     return done.stdout.strip()
 
 
-def test_lerobot_pin_is_the_release_that_keeps_numpy_1_and_hub_0():
-    assert _call("lerobot_rev") == "v0.4.4"
+def test_lerobot_pin_accepts_the_rocm_torchvision_wheel():
+    assert _call("lerobot_rev") == "v0.6.0"
+
+
+def test_arm_packages_are_installed_without_lerobots_dependency_set():
+    specs = _call("lerobot_runtime_specs")
+    assert specs.splitlines() == [
+        "draccus==0.10.0",
+        "feetech-servo-sdk>=1.0.0,<2.0.0",
+        "pyserial>=3.5,<4.0",
+        "deepdiff>=7.0.1,<9.0.0",
+        "tqdm>=4.66.0,<5.0.0",
+    ]
+    bootstrap = (PIPE_ROOT / "bootstrap.sh").read_text()
+    assert "--no-deps -e" in bootstrap
+    assert "lerobot_runtime_specs" in bootstrap
+    assert "Re-pinning numpy" not in bootstrap
+    assert 'uv pip install "$(hub_spec)"' not in bootstrap
 
 
 def test_hub_2_and_hub_1_are_re_pinned_and_0_35_stays():

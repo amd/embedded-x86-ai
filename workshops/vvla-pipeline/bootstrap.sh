@@ -25,7 +25,8 @@
 #      (--system-site-packages so the ROS 2 Jazzy python stack stays importable)
 #   3. Installs Python deps into the venv:
 #        - PyTorch ROCm wheels for the DETECTED arch (AMD repo)
-#        - LeRobot v0.4.4 [feetech] from source, MediaPipe, Whisper deps, etc.
+#        - LeRobot v0.6.0 from source, without its dependency set, plus the
+#          Feetech arm packages. MediaPipe, Whisper deps, etc.
 #        - Ryzen AI onnxruntime (VitisAI EP) from $RYZEN_AI_WHEELS - installed
 #          LAST (section 4c) so nothing clobbers it; ROCm is never used for
 #          onnxruntime (llama.cpp + torch only)
@@ -468,16 +469,17 @@ uv pip install -c "$TORCH_CONSTRAINT" -r "${REPO_ROOT}/requirements.txt"
 # shellcheck disable=SC1091
 source "${REPO_ROOT}/scripts/dep_pins.sh"
 LEROBOT_REV="$(lerobot_rev)"
-log "Installing LeRobot ${LEROBOT_REV} (feetech extras) from source"
+log "Installing LeRobot ${LEROBOT_REV} from source, without its dependency set"
 mkdir -p "$THIRD_PARTY"
 LEROBOT_DIR="${THIRD_PARTY}/lerobot"
 if [[ ! -d "${LEROBOT_DIR}/.git" ]]; then
   git clone --branch "$LEROBOT_REV" --depth 1 \
     https://github.com/huggingface/lerobot.git "$LEROBOT_DIR"
 fi
-# A clone left on a later release is moved back. v0.5.0 and later require
-# numpy>=2 and huggingface-hub>=1, and the next bootstrap would pull them
-# again. Fetch only when the tag is not already local, so an offline re-run
+# A clone on any other release is moved to this tag. The tag is installed
+# with --no-deps: its declared numpy and huggingface-hub ranges contradict
+# requirements.txt, and those pins stay as requirements.txt wrote them.
+# Fetch only when the tag is not already local, so an offline re-run
 # of an already-pinned tree still works.
 if ! git -C "$LEROBOT_DIR" rev-parse -q --verify "refs/tags/${LEROBOT_REV}" >/dev/null; then
   git -C "$LEROBOT_DIR" fetch --depth 1 origin tag "$LEROBOT_REV" \
@@ -485,7 +487,13 @@ if ! git -C "$LEROBOT_DIR" rev-parse -q --verify "refs/tags/${LEROBOT_REV}" >/de
 fi
 git -C "$LEROBOT_DIR" checkout --detach "$LEROBOT_REV" \
   || die "Could not check out LeRobot ${LEROBOT_REV}. Leave ${LEROBOT_DIR} clean and run bootstrap again."
-uv pip install -c "$TORCH_CONSTRAINT" -e "${LEROBOT_DIR}[feetech]"
+uv pip install -c "$TORCH_CONSTRAINT" -c "${REPO_ROOT}/requirements.txt" \
+  --no-deps -e "${LEROBOT_DIR}" \
+  || die "Could not install LeRobot ${LEROBOT_REV}."
+mapfile -t LEROBOT_RUNTIME < <(lerobot_runtime_specs)
+uv pip install -c "$TORCH_CONSTRAINT" -c "${REPO_ROOT}/requirements.txt" \
+  "${LEROBOT_RUNTIME[@]}" \
+  || die "Could not install the LeRobot arm packages."
 rm -f "$TORCH_CONSTRAINT"
 strip_nvidia_cuda
 
@@ -529,31 +537,26 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# 4b. Enforce numpy < 2 and huggingface-hub 0.34.2 through 0.35.x
+# 4b. numpy and huggingface-hub must still match requirements.txt
 # -----------------------------------------------------------------------------
-# onnxruntime and the AMD/Ryzen wheels are compiled against the numpy 1.x ABI.
-# transformers requires huggingface-hub <1.0. A LeRobot release at v0.5.0 or
-# later moves numpy to 2.x and huggingface-hub to 1.x or 2.x, and 2.x is not
-# inside the 0.34/0.35 range this stack keeps. Put both back after that install.
+# The LeRobot install above does not solve LeRobot's dependency set, so it
+# must not have moved either pin. ONNX Runtime needs the numpy 1.x ABI.
+# transformers needs huggingface-hub <1.0.
 NPVER="$(python -c 'import numpy,sys; print(numpy.__version__)' 2>/dev/null || echo none)"
 case "$NPVER" in
-  2.*|none)
-    log "Re-pinning numpy < 2 (found ${NPVER}; onnxruntime needs the 1.x ABI)"
-    uv pip install 'numpy<2' \
-      || warn "Could not downgrade numpy below 2.0 - onnxruntime imports may fail."
+  1.*)
+    log "numpy ${NPVER} OK (1.x ABI)"
     ;;
   *)
-    log "numpy ${NPVER} OK (1.x ABI)"
+    die "numpy is ${NPVER}. requirements.txt pins numpy<2. LeRobot must not change it."
     ;;
 esac
 
 HUBVER="$(python -c 'import huggingface_hub as h; print(h.__version__)' 2>/dev/null || echo none)"
-if [[ "$(hub_pin_action "$HUBVER")" == "repin" ]]; then
-  log "Re-pinning $(hub_spec) (found ${HUBVER}; transformers needs hub <1.0)"
-  uv pip install "$(hub_spec)" \
-    || warn "Could not pin huggingface-hub to $(hub_spec) - transformers imports may fail."
-else
+if [[ "$(hub_pin_action "$HUBVER")" == "ok" ]]; then
   log "huggingface-hub ${HUBVER} OK ($(hub_spec))"
+else
+  die "huggingface-hub is ${HUBVER}. requirements.txt pins $(hub_spec)."
 fi
 
 # onnx 1.18+ writes model IR version 13, which the VitisAI ORT runtime (max IR

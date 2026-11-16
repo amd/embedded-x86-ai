@@ -145,11 +145,11 @@ Gemma 4 is constrained by `config/intent.gbnf` so it can only emit `{"command": 
 | ROCm | 7.2.4 |
 | Ryzen AI SW | 1.7.1 (VitisAI ONNX Runtime EP) |
 | ROS 2 | Jazzy (required), with ros2_control and the controllers |
-| LeRobot | v0.4.4 (source install, `[feetech]`) |
+| LeRobot | v0.6.0 source, installed without its dependency set. The Feetech SDK is installed separately. |
 | PyTorch | 2.11.0+rocm7.13.0 from `repo.amd.com/rocm/whl/<detected gfx>`. The PyPI wheel is not used; it downloads the NVIDIA CUDA stack. |
 | Robot | LeRobot SO-101 follower arm |
 
-LeRobot is checked out at v0.4.4. v0.5.0 and later require numpy 2 and huggingface-hub 1.x, and there is no v0.5.2 release. This stack stays on numpy 1.x and on huggingface-hub 0.34.2 through 0.35.x.
+LeRobot is checked out at v0.6.0 and installed with `--no-deps`. No LeRobot release accepts torchvision 0.26, numpy below 2, and huggingface-hub below 1.0 at the same time. v0.6.0 is the source whose code accepts the ROCm torchvision wheel. numpy and huggingface-hub stay on the pins in `requirements.txt`. The arm packages installed beside it are draccus, the Feetech SDK, pyserial, and deepdiff.
 
 ## Compute placement
 
@@ -406,7 +406,7 @@ python scripts/export_yolo26s_detect.py
 ./bootstrap.sh --skip-apt --skip-llama --skip-models
 ```
 
-`./bootstrap.sh` installs the apt packages, ROCm, the `.venv`, the ROCm PyTorch wheels, LeRobot v0.4.4, and llama.cpp with HIP (gfx1100 on Strix). A checkout already on a later LeRobot release is moved back to v0.4.4. After that install, bootstrap puts numpy back on 1.x and huggingface-hub on 0.34.2 through 0.35.x if a dependency moved them. ONNX Runtime needs the numpy 1.x ABI, and transformers needs huggingface-hub below 1.0. It downloads the Gemma 4 E4B GGUF and its audio projector with `hf download` from `ggml-org/gemma-4-E4B-it-GGUF`, and Silero VAD v6.2.3, through `scripts/ensure_voice.sh`. It installs ROS 2 Jazzy when it is absent, plus ros2_control, the controllers, and `topic_based_ros2_control` 0.3.0 with the patches in `patches/topic_based_ros2_control/`, and builds that into `ros_ws/`. The second run writes `cache/yolo26s_pose_fp32/` and `cache/yolo26s_detect_fp32/` (about 16 minutes and 3 minutes). `./run_pipeline.sh` sources the venv, ROS 2, and `scripts/ryzen_ai_env.sh`.
+`./bootstrap.sh` installs the apt packages, ROCm, the `.venv`, the ROCm PyTorch wheels, LeRobot v0.6.0 without its dependency set, and llama.cpp with HIP (gfx1100 on Strix). A checkout on another LeRobot release is moved to v0.6.0. numpy stays below 2 and huggingface-hub stays on 0.34.2 through 0.35.x, because those are the pins in `requirements.txt`. ONNX Runtime needs the numpy 1.x ABI, and transformers needs huggingface-hub below 1.0. It downloads the Gemma 4 E4B GGUF and its audio projector with `hf download` from `ggml-org/gemma-4-E4B-it-GGUF`, and Silero VAD v6.2.3, through `scripts/ensure_voice.sh`. It installs ROS 2 Jazzy when it is absent, plus ros2_control, the controllers, and `topic_based_ros2_control` 0.3.0 with the patches in `patches/topic_based_ros2_control/`, and builds that into `ros_ws/`. The second run writes `cache/yolo26s_pose_fp32/` and `cache/yolo26s_detect_fp32/` (about 16 minutes and 3 minutes). `./run_pipeline.sh` sources the venv, ROS 2, and `scripts/ryzen_ai_env.sh`.
 
 `cache/` is not in git and does not copy to another machine: a cache from a different compiler loads and then mis-detects (`recompile model with latest VAIML version`). Delete the two directories above and run the second bootstrap again on this machine. To rebuild one model, remove its directory and run `scripts/compile_npu_models.sh --only yolo_pose` (or `yolo_detect`). When those `.rai` files were already compiled here, skip the export and the second bootstrap: `./bootstrap.sh --skip-compile` is the whole repository step. Other flags are `--skip-apt`, `--skip-llama`, `--skip-models`, and `--cpu-only`.
 

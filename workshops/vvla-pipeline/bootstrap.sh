@@ -25,7 +25,7 @@
 #      (--system-site-packages so the ROS 2 Jazzy python stack stays importable)
 #   3. Installs Python deps into the venv:
 #        - PyTorch ROCm wheels for the DETECTED arch (AMD repo)
-#        - LeRobot [feetech] from source, MediaPipe, Whisper deps, etc.
+#        - LeRobot v0.4.4 [feetech] from source, MediaPipe, Whisper deps, etc.
 #        - Ryzen AI onnxruntime (VitisAI EP) from $RYZEN_AI_WHEELS - installed
 #          LAST (section 4c) so nothing clobbers it; ROCm is never used for
 #          onnxruntime (llama.cpp + torch only)
@@ -406,10 +406,10 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 log "Creating uv venv at ${VENV_DIR}"
-# Pin to the SYSTEM Python 3.12 (Ubuntu 24.04 default). Two reasons:
-#   - lerobot 0.5.2 requires Python >= 3.12 (uv's managed 3.11 fails resolution)
-#   - --system-site-packages exposes /usr/lib, not /opt/ros. Jazzy's Python
-#     packages (rclpy, control_msgs) are added by ros_jazzy.pth below.
+# Pin to the SYSTEM Python 3.12 (Ubuntu 24.04 default). ROS 2 Jazzy's
+# packages are built for it, and uv's managed 3.11 fails resolution.
+# --system-site-packages exposes /usr/lib, not /opt/ros. Jazzy's Python
+# packages (rclpy, control_msgs) are added by ros_jazzy.pth below.
 SYS_PY="$(command -v /usr/bin/python3.12 || command -v python3.12 || true)"
 if [[ -z "$SYS_PY" ]]; then
   die "python3.12 not found - install it first (apt install python3.12 python3.12-dev) or check your Ubuntu 24.04 setup."
@@ -465,12 +465,27 @@ write_torch_constraints "$TORCH_CONSTRAINT"
 log "Installing Python dependencies into the venv"
 uv pip install -c "$TORCH_CONSTRAINT" -r "${REPO_ROOT}/requirements.txt"
 
-log "Installing LeRobot (feetech extras) from source"
+# shellcheck disable=SC1091
+source "${REPO_ROOT}/scripts/dep_pins.sh"
+LEROBOT_REV="$(lerobot_rev)"
+log "Installing LeRobot ${LEROBOT_REV} (feetech extras) from source"
 mkdir -p "$THIRD_PARTY"
-if [[ ! -d "${THIRD_PARTY}/lerobot/.git" ]]; then
-  git clone https://github.com/huggingface/lerobot.git "${THIRD_PARTY}/lerobot"
+LEROBOT_DIR="${THIRD_PARTY}/lerobot"
+if [[ ! -d "${LEROBOT_DIR}/.git" ]]; then
+  git clone --branch "$LEROBOT_REV" --depth 1 \
+    https://github.com/huggingface/lerobot.git "$LEROBOT_DIR"
 fi
-uv pip install -c "$TORCH_CONSTRAINT" -e "${THIRD_PARTY}/lerobot[feetech]"
+# A clone left on a later release is moved back. v0.5.0 and later require
+# numpy>=2 and huggingface-hub>=1, and the next bootstrap would pull them
+# again. Fetch only when the tag is not already local, so an offline re-run
+# of an already-pinned tree still works.
+if ! git -C "$LEROBOT_DIR" rev-parse -q --verify "refs/tags/${LEROBOT_REV}" >/dev/null; then
+  git -C "$LEROBOT_DIR" fetch --depth 1 origin tag "$LEROBOT_REV" \
+    || die "Could not fetch LeRobot ${LEROBOT_REV}."
+fi
+git -C "$LEROBOT_DIR" checkout --detach "$LEROBOT_REV" \
+  || die "Could not check out LeRobot ${LEROBOT_REV}. Leave ${LEROBOT_DIR} clean and run bootstrap again."
+uv pip install -c "$TORCH_CONSTRAINT" -e "${LEROBOT_DIR}[feetech]"
 rm -f "$TORCH_CONSTRAINT"
 strip_nvidia_cuda
 
@@ -514,13 +529,12 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# 4b. Enforce numpy < 2 and huggingface-hub < 1.0
+# 4b. Enforce numpy < 2 and huggingface-hub 0.34.2 through 0.35.x
 # -----------------------------------------------------------------------------
-# onnxruntime and the AMD/Ryzen wheels are compiled against the numpy 1.x ABI;
-# torch / ultralytics may have pulled numpy 2.x as a transitive upgrade, which
-# crashes every `import onnxruntime`. transformers requires huggingface-hub <1.0
-# but lerobot / optimum can drag in 1.x. Re-pin both as the last dependency
-# action so they can't be clobbered by an earlier step.
+# onnxruntime and the AMD/Ryzen wheels are compiled against the numpy 1.x ABI.
+# transformers requires huggingface-hub <1.0. A LeRobot release at v0.5.0 or
+# later moves numpy to 2.x and huggingface-hub to 1.x or 2.x, and 2.x is not
+# inside the 0.34/0.35 range this stack keeps. Put both back after that install.
 NPVER="$(python -c 'import numpy,sys; print(numpy.__version__)' 2>/dev/null || echo none)"
 case "$NPVER" in
   2.*|none)
@@ -534,16 +548,13 @@ case "$NPVER" in
 esac
 
 HUBVER="$(python -c 'import huggingface_hub as h; print(h.__version__)' 2>/dev/null || echo none)"
-case "$HUBVER" in
-  1.*|none)
-    log "Re-pinning huggingface-hub < 1.0 (found ${HUBVER}; transformers requires <1.0)"
-    uv pip install 'huggingface_hub[cli]>=0.34,<1.0' \
-      || warn "Could not pin huggingface-hub below 1.0 - transformers imports may fail."
-    ;;
-  *)
-    log "huggingface-hub ${HUBVER} OK (<1.0)"
-    ;;
-esac
+if [[ "$(hub_pin_action "$HUBVER")" == "repin" ]]; then
+  log "Re-pinning $(hub_spec) (found ${HUBVER}; transformers needs hub <1.0)"
+  uv pip install "$(hub_spec)" \
+    || warn "Could not pin huggingface-hub to $(hub_spec) - transformers imports may fail."
+else
+  log "huggingface-hub ${HUBVER} OK ($(hub_spec))"
+fi
 
 # onnx 1.18+ writes model IR version 13, which the VitisAI ORT runtime (max IR
 # 11) cannot load. Cap it so exported/probe models stay loadable on the NPU.

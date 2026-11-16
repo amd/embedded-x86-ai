@@ -34,7 +34,7 @@ from twin_ros_rig import (
     join_test_domain,
 )
 
-pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.slow, pytest.mark.timeout(300)]
+pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.slow, pytest.mark.timeout(60)]
 pytest.importorskip("rclpy")
 
 

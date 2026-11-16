@@ -17,8 +17,10 @@ Only the in-memory copy of a notebook changes: ``RIG_STANDINS`` goes first,
 and ``REPORT`` last. The rig's hardware is replaced, nothing else:
 
 * the arm and the arm camera: the MuJoCo digital twin (``robot.backend: sim``,
-  ``cameras.arm.source: sim``),
-* the webcam: a generated frame, panned slowly, with pose from
+  ``cameras.arm.source: sim``). The arm camera stays on its ROS topic.
+* the webcam: a generated frame, read in this process. ``apply_notebook_standins``
+  turns the mount camera's ``use_ros2`` off, so the notebook does not wait on
+  ``/cameras/mount/image_raw`` or ``/dev/video0``. Pose comes from
   ``common.fixtures.ScriptedPose`` (the real pose session still opens),
 * the microphone: none (Whisper still loads; Llama stays real).
 
@@ -31,6 +33,7 @@ reaches the kernel's output, where :meth:`Watcher.record` finds it.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -44,10 +47,29 @@ PIPE_ROOT = Path(__file__).resolve().parents[2]
 NOTEBOOKS = PIPE_ROOT / "workshop" / "notebooks"
 KERNEL = "vvla-workshop"
 
+
+def apply_notebook_standins(cfg: dict) -> dict:
+    """Point a notebook test at the twin and at the generated webcam frame.
+
+    The mount camera stays in this process. ``use_ros2`` would subscribe to
+    ``/cameras/mount/image_raw``, and the camera node publishes that topic
+    only when ``/dev/video0`` opens. The arm camera stays on ROS: the twin
+    publishes it, and the pickup cases already read it that way.
+    ``apply_sim_overrides`` still leaves a real mount camera for a normal run.
+    """
+    cfg.setdefault("robot", {})["backend"] = "sim"
+    cameras = cfg.setdefault("cameras", {})
+    cameras.setdefault("arm", {})["source"] = "sim"
+    mount = cameras.setdefault("mount", {})
+    mount["use_ros2"] = False
+    mount["source"] = "device"
+    return cfg
+
+
 RIG_STANDINS = '''\
 # notebook test: the rig's hardware is replaced; the notebook is not
 #   arm + arm camera -> the MuJoCo digital twin (robot.backend: sim, cameras.arm.source: sim)
-#   webcam           -> a generated frame, panned; pose is ScriptedPose
+#   webcam           -> generated frame in this process (mount use_ros2 off)
 #   microphone       -> none
 import sys as _sys
 import threading as _threading
@@ -71,6 +93,7 @@ class _RecordedSession(_ort.InferenceSession):
 _ort.InferenceSession = _RecordedSession
 
 _sys.path.insert(0, str((_Path.cwd() / ".." / ".." / "solution").resolve()))
+@@APPLY_NOTEBOOK_STANDINS@@
 import common.config as _config
 import common.speech as _speech
 
@@ -78,10 +101,7 @@ _load_config = _config.load_config
 
 
 def _twin_config(path=None):
-    cfg = _load_config(path)
-    cfg["robot"]["backend"] = "sim"
-    cfg["cameras"]["arm"]["source"] = "sim"
-    return cfg
+    return apply_notebook_standins(_load_config(path))
 
 
 _config.load_config = _twin_config
@@ -166,6 +186,10 @@ import common.twin_voice as _twin_voice
 
 _twin_voice.REPORT_RECORDS = True  # the test reads each command's record from the kernel's output
 '''
+
+# The kernel runs this function's own source. It cannot import it: the venv has
+# a regular package named ``tests`` in site-packages that hides this directory.
+RIG_STANDINS = RIG_STANDINS.replace("@@APPLY_NOTEBOOK_STANDINS@@\n", inspect.getsource(apply_notebook_standins))
 
 REPORT = '''\
 import json as _json

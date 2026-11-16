@@ -23,7 +23,7 @@ import pytest
 
 from twin_ros_rig import TEST_DOMAIN_ID, assert_domain_free, join_test_domain
 
-pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.slow, pytest.mark.timeout(240)]
+pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.slow, pytest.mark.timeout(30)]
 pytest.importorskip("rclpy")
 
 # Jaws low over the table, closing axis horizontal: how the pickup grasps the ball.

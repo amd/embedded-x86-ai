@@ -26,7 +26,7 @@ requests>=2.31
 psutil>=5.9
 rich>=13.7
 beartype>=0.18
-huggingface_hub[cli]>=0.34,<1.0   # transformers requires hub <1.0, do NOT let uv resolve 1.x
+huggingface_hub[cli]>=0.34.2,<0.36.0   # transformers needs hub <1.0; LeRobot v0.4.4 needs >=0.34.2,<0.36.0
 jiwer>=3.0                 # optional: WER/CER evaluation
 
 # --- VLA upgrade additions ---

@@ -28,15 +28,15 @@ from notebook_harness import PIPE_ROOT
 from so101_sim.control import BRING_UP_S
 from twin_ros_rig import TEST_DOMAIN_ID
 
-pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.timeout(300)]
+pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.timeout(45)]
 pexpect = pytest.importorskip("pexpect")
 popen_spawn = pytest.importorskip("pexpect.popen_spawn")
 
-# Cold start of a camera node and of a launch: a few seconds on this machine.
-# These bound the wait for an event that is expected to happen.
-CAMERA_START_S = 60.0
-LAUNCH_EXIT_S = 120.0
-STOP_S = 30.0
+# Cold start of a camera node and of a launch. The passing tests on this
+# machine finished in 5.61 s, so these bound the wait for that event.
+CAMERA_START_S = 15.0
+LAUNCH_EXIT_S = 20.0
+STOP_S = 10.0
 BROKEN_XACRO = 'raise ImportError("simulated missing xacro (test_launch_split)")\n'
 
 

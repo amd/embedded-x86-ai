@@ -29,7 +29,7 @@ import pytest
 from notebook_harness import PIPE_ROOT
 from twin_ros_rig import assert_domain_free, join_test_domain, wait_exit
 
-pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.slow, pytest.mark.timeout(600)]
+pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.slow, pytest.mark.timeout(150)]
 pexpect = pytest.importorskip("pexpect")
 popen_spawn = pytest.importorskip("pexpect.popen_spawn")
 pytest.importorskip("rclpy")

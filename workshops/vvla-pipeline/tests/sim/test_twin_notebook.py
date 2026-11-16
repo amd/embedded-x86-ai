@@ -71,7 +71,7 @@ from twin_ros_rig import (
     xml_poses,
 )
 
-pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.docs, pytest.mark.slow, pytest.mark.timeout(900)]
+pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.docs, pytest.mark.slow, pytest.mark.timeout(120)]
 pytest.importorskip("rclpy")
 nbformat = pytest.importorskip("nbformat")
 pytest.importorskip("nbclient")

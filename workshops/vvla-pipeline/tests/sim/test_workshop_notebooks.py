@@ -27,7 +27,7 @@ import pytest
 from notebook_harness import NOTEBOOKS, PIPE_ROOT, run_notebook
 from twin_ros_rig import join_test_domain
 
-pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.docs, pytest.mark.slow, pytest.mark.timeout(900)]
+pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.docs, pytest.mark.slow, pytest.mark.timeout(180)]
 pytest.importorskip("rclpy")
 pytest.importorskip("nbformat")
 pytest.importorskip("nbclient")

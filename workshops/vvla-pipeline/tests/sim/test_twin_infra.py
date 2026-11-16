@@ -33,7 +33,7 @@ from twin_ros_rig import (
     wait_exit,
 )
 
-pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.slow, pytest.mark.timeout(240)]
+pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.slow, pytest.mark.timeout(45)]
 pytest.importorskip("rclpy")
 
 SOLUTION = Path(__file__).resolve().parents[2] / "workshop" / "solution"

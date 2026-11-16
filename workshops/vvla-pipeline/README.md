@@ -145,9 +145,11 @@ Gemma 4 is constrained by `config/intent.gbnf` so it can only emit `{"command": 
 | ROCm | 7.2.4 |
 | Ryzen AI SW | 1.7.1 (VitisAI ONNX Runtime EP) |
 | ROS 2 | Jazzy (required), with ros2_control and the controllers |
-| LeRobot | 0.5.2 (source install, `[feetech]`) |
+| LeRobot | v0.4.4 (source install, `[feetech]`) |
 | PyTorch | 2.11.0+rocm7.13.0 from `repo.amd.com/rocm/whl/<detected gfx>`. The PyPI wheel is not used; it downloads the NVIDIA CUDA stack. |
 | Robot | LeRobot SO-101 follower arm |
+
+LeRobot is checked out at v0.4.4. v0.5.0 and later require numpy 2 and huggingface-hub 1.x, and there is no v0.5.2 release. This stack stays on numpy 1.x and on huggingface-hub 0.34.2 through 0.35.x.
 
 ## Compute placement
 
@@ -404,7 +406,7 @@ python scripts/export_yolo26s_detect.py
 ./bootstrap.sh --skip-apt --skip-llama --skip-models
 ```
 
-`./bootstrap.sh` installs the apt packages, ROCm, the `.venv`, the ROCm PyTorch wheels, LeRobot, and llama.cpp with HIP (gfx1100 on Strix). It downloads the Gemma 4 E4B GGUF and its audio projector with `hf download` from `ggml-org/gemma-4-E4B-it-GGUF`, and Silero VAD v6.2.3, through `scripts/ensure_voice.sh`. It installs ROS 2 Jazzy when it is absent, plus ros2_control, the controllers, and `topic_based_ros2_control` 0.3.0 with the patches in `patches/topic_based_ros2_control/`, and builds that into `ros_ws/`. The second run writes `cache/yolo26s_pose_fp32/` and `cache/yolo26s_detect_fp32/` (about 16 minutes and 3 minutes). `./run_pipeline.sh` sources the venv, ROS 2, and `scripts/ryzen_ai_env.sh`.
+`./bootstrap.sh` installs the apt packages, ROCm, the `.venv`, the ROCm PyTorch wheels, LeRobot v0.4.4, and llama.cpp with HIP (gfx1100 on Strix). A checkout already on a later LeRobot release is moved back to v0.4.4. After that install, bootstrap puts numpy back on 1.x and huggingface-hub on 0.34.2 through 0.35.x if a dependency moved them. ONNX Runtime needs the numpy 1.x ABI, and transformers needs huggingface-hub below 1.0. It downloads the Gemma 4 E4B GGUF and its audio projector with `hf download` from `ggml-org/gemma-4-E4B-it-GGUF`, and Silero VAD v6.2.3, through `scripts/ensure_voice.sh`. It installs ROS 2 Jazzy when it is absent, plus ros2_control, the controllers, and `topic_based_ros2_control` 0.3.0 with the patches in `patches/topic_based_ros2_control/`, and builds that into `ros_ws/`. The second run writes `cache/yolo26s_pose_fp32/` and `cache/yolo26s_detect_fp32/` (about 16 minutes and 3 minutes). `./run_pipeline.sh` sources the venv, ROS 2, and `scripts/ryzen_ai_env.sh`.
 
 `cache/` is not in git and does not copy to another machine: a cache from a different compiler loads and then mis-detects (`recompile model with latest VAIML version`). Delete the two directories above and run the second bootstrap again on this machine. To rebuild one model, remove its directory and run `scripts/compile_npu_models.sh --only yolo_pose` (or `yolo_detect`). When those `.rai` files were already compiled here, skip the export and the second bootstrap: `./bootstrap.sh --skip-compile` is the whole repository step. Other flags are `--skip-apt`, `--skip-llama`, `--skip-models`, and `--cpu-only`.
 
@@ -577,7 +579,7 @@ cd workshop && ./run_notebooks.sh --test    # notebooks and the Instructor's cor
 
 `./run_notebooks.sh --test` does the setup [workshop/README.md](workshop/README.md) describes: the `.venv`, the Ryzen AI runtime, ROS 2, the `vvla-workshop` kernel and llama-server on the iGPU. Then it runs the notebooks in `workshop/notebooks/`, in the README's order, and the README's Instructor's corner commands. The notebooks need llama-server, which that command starts.
 
-`./run_sim_tests.sh` uses the same `.venv`, Ryzen AI runtime, and ROS 2. It runs `pytest tests/npu`, then `pytest tests/sim -m "sim and not docs"`. Arguments after the command go to the twin tests only. It does not start llama-server or Jupyter, and it does not run the tests marked `docs` (the notebooks, the Instructor's corner, and the notebook console). Those belong to `./run_notebooks.sh --test`, which stands in a generated frame for the webcam and a scripted person for pose.
+`./run_sim_tests.sh` uses the same `.venv`, Ryzen AI runtime, and ROS 2. It runs `pytest tests/npu`, then `pytest tests/sim -m "sim and not docs"`. Arguments after the command go to the twin tests only. It does not start llama-server or Jupyter, and it does not run the tests marked `docs` (the notebooks, the Instructor's corner, and the notebook console). Those belong to `./run_notebooks.sh --test`, which stands in a generated frame for the webcam and a scripted person for pose. The notebook reads that frame in this process. It does not open `/dev/video0` or wait on `/cameras/mount/image_raw`.
 
 Spoken commands are injected as text. The operator's pose and hands are scripted. The arm camera is read by YOLO on the NPU (`--sim-eyes seg` substitutes the twin's segmentation boxes). The twin stands in for the arm and its camera, and its rendering runs on the iGPU. No arm, camera, or microphone has to be attached. The ROS cases run headless on a private ROS domain, and the exit code is the result.
 

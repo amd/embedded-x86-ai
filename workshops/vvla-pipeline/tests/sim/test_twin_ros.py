@@ -7,7 +7,7 @@
 
 """The workshop behaviors on the notebook twin, over ROS 2.
 
-The context is the section 5 console's (``TwinRig``): ``ros.arm_client.Ros2ArmClient``
+The context is the section 4 console's (``TwinRig``): ``ros.arm_client.Ros2ArmClient``
 on the controllers, the arm camera behind ``FanoutCamera``, the YOLO eyes,
 and the keyword parser through ``handle_transcript``. The checks mirror the
 in-process workshop scenarios in ``test_scenarios.py``. Every reading of the twin comes

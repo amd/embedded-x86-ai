@@ -7,7 +7,7 @@
 
 """The twin console's voice path (PROVIDED): what you say or type, one command at a time.
 
-Section 5 of ``notebooks/03_integration/02_digital_twin.ipynb`` builds one
+Section 4 of ``notebooks/03_integration/02_digital_twin.ipynb`` builds one
 :class:`VoiceCommands`. While the console runs, every utterance, spoken or
 typed, goes to :meth:`VoiceCommands.on_transcript`: "stop" acts at once,
 noise is shown and dropped, anything else waits in a queue. :meth:`VoiceCommands.dispatch_loop`

@@ -49,7 +49,7 @@ cd workshop
 Jupyter opens `notebooks/`. Read and run them in order: `01_ai_models`,
 `02_ros2`, `03_integration`.
 
-The `02_ros2` notebooks and section 5 of `03_integration/02_digital_twin.ipynb` import `rclpy`. `bootstrap.sh` installs ROS 2 Jazzy and creates `.venv` with `--system-site-packages`. `./run_notebooks.sh` sources `/opt/ros/jazzy/setup.bash` before Jupyter starts.
+The `02_ros2` notebooks and section 4 of `03_integration/02_digital_twin.ipynb` import `rclpy`. `bootstrap.sh` installs ROS 2 Jazzy and creates `.venv` with `--system-site-packages`. `./run_notebooks.sh` sources `/opt/ros/jazzy/setup.bash` before Jupyter starts.
 
 After the notebooks, the TODOs are in `project/`. Follow [project/README.md](project/README.md).
 

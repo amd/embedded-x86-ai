@@ -5,7 +5,7 @@
 # Portions of this file consist of AI-generated content. AI-assisted
 # content has been reviewed and validated by the authors.
 
-"""``02_digital_twin.ipynb`` section 5, driven the way JupyterLab drives it.
+"""``02_digital_twin.ipynb`` section 4, driven the way JupyterLab drives it.
 
 The module starts one ``vvla-workshop`` kernel and runs the notebook through
 ``c0000014`` once. Each test runs only the console cell (``c0000016``): its

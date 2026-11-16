@@ -370,7 +370,7 @@ def keyword_parse(text: str):
 
 
 class TwinRig:
-    """The section 5 console's context, on a :class:`~common.twin_ros.TwinSession`.
+    """The section 4 console's context, on a :class:`~common.twin_ros.TwinSession`.
 
     The arm camera and the mount camera are wrapped in ``FanoutCamera``
     as the console wraps them, and the operator is the notebook's scripted

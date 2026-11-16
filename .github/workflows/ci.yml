@@ -1,0 +1,167 @@
+# File checks for every pull request. No GPU. See docs/CI.md.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  compile-python:
+    name: Python parses
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: compileall
+        run: python -m compileall -q .
+
+  lint-python:
+    name: Ruff
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install ruff==0.6.9
+      - name: ruff check
+        run: ruff check .
+
+  notebooks-valid:
+    name: Notebooks are valid JSON
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install nbformat
+        run: pip install nbformat==5.10.4
+      - name: Validate notebooks
+        run: |
+          python - <<'PY'
+          import glob, sys
+          import nbformat
+          failed = False
+          for path in glob.glob("**/*.ipynb", recursive=True):
+              if ".ipynb_checkpoints" in path:
+                  continue
+              try:
+                  nbformat.read(path, as_version=4)
+                  print(f"ok   {path}")
+              except Exception as e:
+                  print(f"FAIL {path}: {e}")
+                  failed = True
+          sys.exit(1 if failed else 0)
+          PY
+
+  yaml-valid:
+    name: YAML is valid
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install PyYAML
+        run: pip install pyyaml==6.0.2
+      - name: Load all YAML files
+        run: |
+          python - <<'PY'
+          import glob, sys
+          import yaml
+          failed = False
+          seen = set()
+          for pat in ("**/*.yml", "**/*.yaml"):
+              for path in glob.glob(pat, recursive=True):
+                  if path in seen:
+                      continue
+                  seen.add(path)
+                  try:
+                      with open(path, encoding="utf-8") as handle:
+                          list(yaml.safe_load_all(handle))
+                      print(f"ok   {path}")
+                  except Exception as e:
+                      print(f"FAIL {path}: {e}")
+                      failed = True
+          sys.exit(1 if failed else 0)
+          PY
+
+  markdown-links:
+    name: Markdown links
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check relative markdown links
+        run: |
+          python - <<'PY'
+          import glob, os, re, sys
+          link_re = re.compile(r'!?\[[^\]]*\]\(([^)]+)\)')
+          failed = False
+          for md in glob.glob("**/*.md", recursive=True):
+              base = os.path.dirname(md)
+              for match in link_re.finditer(open(md, encoding="utf-8").read()):
+                  target = match.group(1).strip()
+                  if target.startswith(("http://", "https://", "#", "mailto:")):
+                      continue
+                  path = target.split("#", 1)[0].split("?", 1)[0]
+                  if not path:
+                      continue
+                  resolved = os.path.normpath(os.path.join(base, path))
+                  if resolved.startswith("..") or os.path.isabs(target):
+                      continue
+                  if not os.path.exists(resolved):
+                      print(f"FAIL {md}: broken link -> {target}")
+                      failed = True
+          print("no broken relative links" if not failed else "")
+          sys.exit(1 if failed else 0)
+          PY
+
+  copyright:
+    name: Copyright header on changed Python
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require an AMD copyright header
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python - <<'PY'
+          import os, subprocess, sys
+          base = os.environ["BASE"]
+          files = subprocess.check_output(
+              ["git", "diff", "--name-only", "--diff-filter=AM", base, "HEAD", "--", "*.py"],
+              text=True,
+          ).splitlines()
+          failed = False
+          for path in files:
+              if not os.path.isfile(path):
+                  continue
+              head = open(path, encoding="utf-8", errors="replace").read(800)
+              if "Copyright" in head and "Advanced Micro Devices" in head:
+                  print(f"ok   {path}")
+                  continue
+              print(f"FAIL {path}: missing AMD copyright header")
+              failed = True
+          if not files:
+              print("no Python files changed")
+          sys.exit(1 if failed else 0)
+          PY

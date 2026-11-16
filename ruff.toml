@@ -1,0 +1,18 @@
+# Minimal on purpose. CI should catch broken Python, not restyle the tree.
+# E9 = syntax errors, F63 = invalid comparisons, F7 = bad statements, F82 = undefined names.
+
+target-version = "py311"
+
+extend-exclude = [
+    "**/assets/**",
+    "**/models/**",
+    "**/cache/**",
+    "**/*.ipynb_checkpoints/**",
+]
+
+[lint]
+select = ["E9", "F63", "F7", "F82"]
+
+[lint.per-file-ignores]
+# Ruff cannot see across notebook cells.
+"**/*.ipynb" = ["F821"]

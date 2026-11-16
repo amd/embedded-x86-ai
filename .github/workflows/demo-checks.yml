@@ -1,0 +1,72 @@
+# One functional check and one performance check per lab that opts in.
+# Workshops are not in this workflow. The hardware job stays skipped until a
+# lab adds ci/manifest.yml, so a missing runner does not queue unrelated PRs.
+#
+# Before the first manifest is added:
+#   1. Register a runner labeled strix-halo (Settings → Actions → Runners).
+#   2. Settings → Actions → General → Fork pull request workflows
+#      → Require approval for all outside collaborators.
+name: Lab checks
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "labs/**"
+      - ".github/workflows/demo-checks.yml"
+      - ".github/scripts/demo_checks.py"
+  schedule:
+    - cron: "0 13 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: labs-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    name: Find lab checks
+    runs-on: ubuntu-24.04
+    outputs:
+      has_hardware: ${{ steps.list.outputs.has_hardware }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install PyYAML
+        run: pip install pyyaml==6.0.2
+      - name: List labs that run on the GPU
+        id: list
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python .github/scripts/demo_checks.py list
+
+  hardware:
+    name: Functional and performance
+    needs: discover
+    if: needs.discover.outputs.has_hardware == 'true'
+    runs-on: [self-hosted, linux, strix-halo]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install PyYAML
+        run: pip install pyyaml==6.0.2
+      - name: Run lab checks
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            python .github/scripts/demo_checks.py run
+          else
+            python .github/scripts/demo_checks.py all
+          fi

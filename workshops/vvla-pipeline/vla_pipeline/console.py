@@ -266,7 +266,7 @@ class TwinConsole:
 
     def __init__(self, ctx, voice: str = "mic"):
         self.ctx = ctx
-        self.voice = voice  # "mic" | "typed"
+        self.voice = voice  # "mic" | "typed" | "file"
         cfg = ctx.cfg
         self.load_threshold = float(
             ((cfg.get("behaviors") or {}).get("grip") or {}).get("load_threshold", 120.0)
@@ -434,6 +434,8 @@ class TwinConsole:
             asr, log = self._asr_pending, list(self._log)
         if self.voice == "typed":
             state, color = "typed commands (stdin)", GRAY
+        elif self.voice == "file":
+            state, color = "audio file input", GRAY
         elif level_t == 0.0 or now - level_t > 2.0:
             state, color = "no microphone signal", RED
         elif speaking:

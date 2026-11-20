@@ -29,6 +29,7 @@ Run
 ---
     python -m vla_pipeline.main                  # full pipeline
     python -m vla_pipeline.main --text-commands  # type instead of speak
+    python -m vla_pipeline.main --audio-file cmd.wav  # recorded command, no mic
     python -m vla_pipeline.main --dry-run        # no robot hardware
 """
 
@@ -357,10 +358,17 @@ def main() -> None:
     )
     parser = argparse.ArgumentParser(description="Strix VLA pipeline orchestrator")
     parser.add_argument("--config", default=None)
-    parser.add_argument(
+    voice_in = parser.add_mutually_exclusive_group()
+    voice_in.add_argument(
         "--text-commands",
         action="store_true",
         help="type commands instead of speaking (skips Whisper)",
+    )
+    voice_in.add_argument(
+        "--audio-file",
+        action="append",
+        metavar="WAV",
+        help="feed WAV file(s) through Whisper instead of the microphone (no mic needed)",
     )
     parser.add_argument("--dry-run", action="store_true", help="no robot hardware")
     parser.add_argument("--headless", action="store_true", help="no preview windows")
@@ -393,7 +401,7 @@ def main() -> None:
     if args.digital_twin and not (args.headless or args.no_console):
         from vla_pipeline.console import TwinConsole
 
-        console = TwinConsole(ctx, voice="typed" if args.text_commands else "mic")
+        console = TwinConsole(ctx, voice="typed" if args.text_commands else "file" if args.audio_file else "mic")
 
     from vla_pipeline.dispatch import Dispatcher
     from vla_pipeline.llm.llama_intent import LlamaIntentParser
@@ -403,8 +411,8 @@ def main() -> None:
     # hot before the user is ready and the first frames are usually room noise
     # that Whisper hallucinates into words. Voice ('stop' included) only starts
     # being honored once the window passes. Tunable via audio.startup_grace_s.
-    # Typed commands have no mic, so they get no window.
-    grace_s = 0.0 if args.text_commands else float((cfg.get("audio", {}) or {}).get("startup_grace_s", 1.5))
+    # Typed commands and WAV files have no mic, so they get no window.
+    grace_s = 0.0 if args.text_commands or args.audio_file else float((cfg.get("audio", {}) or {}).get("startup_grace_s", 1.5))
     dispatcher = Dispatcher(
         ctx,
         llm.parse,
@@ -419,7 +427,18 @@ def main() -> None:
         console.attach(dispatcher)
 
     # ---------------- listener thread (always hot) ----------------
-    if not args.text_commands:
+    if args.audio_file:
+        from vla_pipeline.audio.file_source import feed_audio_files
+        from vla_pipeline.audio.whisper_npu import WhisperNPU
+
+        whisper = WhisperNPU(cfg, device=args.device)
+        threading.Thread(
+            target=feed_audio_files,
+            args=(args.audio_file, whisper.transcribe, _on_transcript, dispatcher.wait_idle, shutdown),
+            daemon=True,
+            name="audio-file",
+        ).start()
+    elif not args.text_commands:
         from vla_pipeline.audio.vad_listener import FastListener
         from vla_pipeline.audio.whisper_npu import WhisperNPU
 

@@ -511,6 +511,7 @@ After the file exists, subsequent launches skip straight to startup.
 ./run_pipeline.sh --dry-run           # no robot hardware (prints joint targets)
 ./run_pipeline.sh --digital-twin      # no robot hardware: the MuJoCo twin, shown in the twin console window
 ./run_pipeline.sh --headless          # no OpenCV preview windows
+./run_pipeline.sh --digital-twin --audio-file /tmp/pick_ball.wav   # no mic: a recorded command goes through Whisper
 ```
 
 The script sources ROS 2 Jazzy, the venv and the Ryzen AI NPU environment (`scripts/ryzen_ai_env.sh`), runs first-time calibration if needed (foreground), starts the SO-101 server node, its ros2_control controllers **and both camera nodes** in the background (when `robot.use_ros2: true` / `cameras.*.use_ros2: true`), runs the orchestrator, and tears everything down on Ctrl-C — the arm always parks at the rest pose. With `robot.use_ros2: false` the orchestrator owns the bus itself (`BusOwnerArm`): one thread writes each goal and reads the servos every control tick. Equivalent ROS launch:
@@ -523,6 +524,13 @@ python -m vla_pipeline.main                       # orchestrator (own terminal)
 ```
 
 A resource-usage CSV (CPU %, RAPL package power, iGPU busy %/VRAM via `rocm-smi`, DRAM bandwidth via AMD perf events) is written to `logs/` on every run. [Compute placement](#compute-placement) lists which model runs on which device.
+
+### No microphone or webcam (cloud / remote machines)
+
+- `--audio-file WAV` sends a recorded command through Whisper instead of the microphone. Repeat it to play several files in order; each waits until the previous behavior has ended.
+- `--text-commands` skips Whisper and reads typed commands.
+- Pick and place on the twin (`--digital-twin`) uses the twin's rendered arm camera, so it needs no webcam. Gesture mimic still needs one.
+- To make a WAV, follow the JFK sample commands under [NPU cache](#npu-cache) (16 kHz mono), or record your own command.
 
 ## Gesture mimicry: direct camera-frame mapping
 
@@ -623,6 +631,7 @@ Most components are standalone modules with their own `__main__` self-test. Pick
 | VAD listener | no | `python -m vla_pipeline.audio.vad_listener --selftest` |
 | Intent grammar + parser | no (needs llama-server build) | `python -m vla_pipeline.llm.llama_intent --selftest` |
 | Whisper STT | mic or wav | `python -m vla_pipeline.audio.whisper_npu --input mic --device npu` |
+| Recorded WAV commands (`--audio-file`) | no | `./run_sim_tests.sh -k audio_file` |
 | YOLO pose | webcam | `python -m vla_pipeline.vision.yolo_pose_npu --device npu` |
 | YOLO detect | webcam | `python -m vla_pipeline.vision.yolo_detect_npu --find ball --role arm` |
 | MediaPipe hands | webcam | `python -m vla_pipeline.vision.mediapipe_hands` |

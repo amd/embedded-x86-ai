@@ -274,6 +274,10 @@ class MockLlamaServer:
     self-test can verify your client sent the GBNF grammar, the system
     prompt, and temperature 0 - the things that make the intent parser
     deterministic on the real iGPU server.
+
+    A request with ``"stream": true`` (the pipeline's parser) is answered as
+    server-sent events carrying the JSON list ``[command, object, words]``; any
+    other request (your parser) gets the ``{"command", "object"}`` object.
     """
 
     def __init__(self, host: str = "127.0.0.1", port: int = 0):
@@ -303,6 +307,25 @@ class MockLlamaServer:
                 for m in payload.get("messages", []):
                     if m.get("role") == "user":
                         user = m.get("content", "")
+                if payload.get("stream"):
+                    # The pipeline's parser reads the answer as it is written: a JSON list of
+                    # the command, the object and the words heard, in two pieces here.
+                    answer = offline_parse_text(user)
+                    words = user if isinstance(user, str) else ""
+                    content = json.dumps([answer["command"], answer["object"], words])
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    half = len(content) // 2
+                    try:
+                        for piece in (content[:half], content[half:]):
+                            event = {"choices": [{"delta": {"content": piece}}]}
+                            self.wfile.write(b"data: " + json.dumps(event).encode() + b"\n\n")
+                            self.wfile.flush()
+                        self.wfile.write(b"data: [DONE]\n\n")
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass  # the client had its call and closed: it does not read the words
+                    return
                 content = json.dumps(offline_parse_text(user))
                 body = json.dumps(
                     {

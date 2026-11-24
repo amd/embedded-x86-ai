@@ -1,9 +1,11 @@
-# Grammar for the intent router: the model can ONLY emit
-#   {"command": "<one of the known commands>", "object": "<0-2 plain words>", "heard": "<words>"}
+# Grammar for the intent router: the model can ONLY emit a JSON list of three strings,
+#   ["<one of the known commands>", "<object: 0-2 plain words>", "<the words heard>"]
 # so JSON parsing can never fail and unknown verbs collapse to "unknown".
-# "heard" is what the speaker said, so the console can show it.
+# The third is what the speaker said, so the console can show it. The command and the object
+# come first: they are acted on while the words are still being written.
+# A list and not an object with named keys: fewer tokens before the call is complete.
 
-root    ::= "{" ws "\"command\"" ws ":" ws cmd ws "," ws "\"object\"" ws ":" ws obj ws "," ws "\"heard\"" ws ":" ws said ws "}"
+root    ::= "[" ws cmd ws "," ws obj ws "," ws said ws "]"
 
 cmd     ::= "\"gesture_mimic\"" | "\"fetch_block\"" | "\"pick_place\"" |
             "\"dance\"" | "\"grip\"" | "\"release\"" | "\"wave\"" | "\"home\"" |

@@ -10,8 +10,9 @@ with an always-hot listener for the safety stop.
 
 Architecture
 ------------
-- A **listener thread** sends a hop of microphone audio to Gemma as soon as
-  that hop contains speech. It does not wait for silence. The microphone
+- A **listener thread** cuts the microphone's sound into utterances and sends
+  each to Gemma the moment the speaker falls silent. The command is acted on
+  when Gemma has written it, before the words it heard. The microphone
   stays hot *while behaviors run*, which is what makes a spoken "stop" able
   to interrupt a running behavior.
 - ``STOP`` is matched with plain keywords on the raw transcript
@@ -453,6 +454,7 @@ def main() -> None:
                 on_level=console.on_level if console is not None else None,
                 on_busy=console.note_asr if console is not None else None,
                 stop_check=shutdown.is_set,
+                on_heard=dispatcher.heard,
             )
     else:
 

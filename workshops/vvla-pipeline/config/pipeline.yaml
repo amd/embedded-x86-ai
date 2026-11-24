@@ -9,7 +9,7 @@ system:
   log_dir: logs
 
 # gemma4-e4b-it: Silero on the CPU, Gemma 4 E4B audio on the iGPU via llama-server.
-# A hop window is sent as soon as it has speech. Nothing waits for silence.
+# A sentence is sent the moment the speaker has been silent for end_silence_ms.
 voice_intent: gemma4-e4b-it
 
 gemma4-e4b-it:
@@ -27,13 +27,20 @@ gemma4-e4b-it:
   no_warmup: true
   hsa_override_gfx_version: "11.5.0"  # Strix Point; "11.5.1" is Strix Halo
   vad_model: models/silero_vad.onnx
-  window_s: 6
-  hop_s: 2                    # first clip waits 2 s so a short command fits; do not wait for silence
-  min_dbfs: -35
+  window_s: 6                 # the longest utterance; one that grows to it is sent as it is
+  # An utterance is sent once the speaker has been silent this long. Lower sends sooner and
+  # cuts a sentence at a shorter pause: a pause after a comma is 220 to 260 ms.
+  end_silence_ms: 300
+  pre_roll_ms: 300            # sound kept from before the first speech frame: the detector answers late
+  # A frame quieter than this is not speech, whatever Silero says. Of the sound with the
+  # microphone's constant offset taken out; -60 leaves the decision to Silero. Raise it only
+  # in a loud room: a quiet microphone's speech frames are around -43 dBFS.
+  min_dbfs: -60
   vad_threshold: 0.5
-  min_voice_ms: 100
-  cooldown_s: 5
-  max_age_s: 10
+  min_voice_ms: 100           # an utterance with less speech than this (a click, a cough) is dropped
+  sent_peak: 0.5              # an utterance is sent with its loud samples at this share of full scale,
+  most_gain: 20               # raised by this factor at most: Gemma hears quiet sound worse
+  max_age_s: 10               # an utterance that waited longer than this for Gemma is not asked
 
 audio:
   sample_rate: 16000

@@ -17,7 +17,7 @@ flowchart TB
         ARMCAM([Arm camera<br/>end effector]):::io
 
         SILERO["Silero VAD<br/>20 ms frames<br/>(CPU)"]:::cpu
-        HOP["Hop window<br/>does not wait for silence"]:::cpu
+        HOP["Utterance<br/>sent when the speaker falls silent"]:::cpu
         POSE["YOLOv26s-pose<br/>17 body keypoints"]:::npu
         DETECT["YOLOv26s-detect<br/>80-class objects"]:::npu
         HANDS["MediaPipe Hands<br/>thumb/index pinch"]:::cpu
@@ -101,11 +101,11 @@ flowchart LR
     end
 
     EARS["👂 EARS<br/><b>Silero · CPU</b><br/>which frames are speech"]:::ear
-    BRAIN["🧠 BRAIN<br/><b>Gemma 4 E4B · iGPU</b><br/>speech and intent<br/>(one hop, GBNF)"]:::brain
+    BRAIN["🧠 BRAIN<br/><b>Gemma 4 E4B · iGPU</b><br/>speech and intent<br/>(one utterance, GBNF)"]:::brain
     EYES["👁 EYES<br/><b>YOLOv26s · NPU</b><br/>pose = where you are<br/>detect = what to grab"]:::eye
     TOUCH["✋ TOUCH<br/><b>Feedback gripper</b><br/>current + position stall<br/>+ camera verify"]:::touch
 
-    EARS ==>|"a hop window<br/>while you are still talking"| BRAIN
+    EARS ==>|"an utterance<br/>the moment you fall silent"| BRAIN
     BRAIN ==>|"which behavior"| BODY
     EYES ==>|"stop at the first<br/>usable view"| BASE
     EYES ==>|"IK reach to the located object<br/>(shoulder/elbow/wrist)"| ELBOW
@@ -118,11 +118,11 @@ flowchart LR
     classDef touch fill:#f8cecc,stroke:#b85450,color:#000,font-size:14px;
 ```
 
-**Ears (Silero) → Brain (Gemma 4):** Silero on the CPU marks 20 ms frames that are speech and louder than −35 dBFS. A hop window of those frames goes to Gemma 4 E4B on the iGPU while the person is still talking. The grammar lets Gemma emit only `{"command", "object", "heard"}`. **Eyes (YOLO) → the arm's aim and reach:** YOLO-pose finds *where you are* (drives `shoulder_pan` and the up/down reach for mimicry and handoff), while YOLO-detect finds *what to grab* (grounds "the ball" on a settled sweep, and one stored frame — the camera ray through the box's bottom meeting the table — gives the object's position for one IK reach). **Touch (gripper) → the jaws:** the feedback close loop senses contact through servo current and position stall, confirms with the arm camera, and keeps the goal a little past contact at `Torque_Limit` 500 while both fingers seat, then eases to `hold_torque_limit` for the carry — which is why a pen no longer slips.
+**Ears (Silero) → Brain (Gemma 4):** Silero on the CPU marks the 20 ms frames that are speech. They are collected into an utterance, which goes to Gemma 4 E4B on the iGPU the moment the person has been silent for 0.3 s. The grammar lets Gemma emit only the list `["<command>", "<object>", "<words heard>"]`, and the command is acted on as soon as Gemma has written it, before the words. **Eyes (YOLO) → the arm's aim and reach:** YOLO-pose finds *where you are* (drives `shoulder_pan` and the up/down reach for mimicry and handoff), while YOLO-detect finds *what to grab* (grounds "the ball" on a settled sweep, and one stored frame — the camera ray through the box's bottom meeting the table — gives the object's position for one IK reach). **Touch (gripper) → the jaws:** the feedback close loop senses contact through servo current and position stall, confirms with the arm camera, and keeps the goal a little past contact at `Torque_Limit` 500 while both fingers seat, then eases to `hold_torque_limit` for the carry — which is why a pen no longer slips.
 
 ## Voice commands → behaviors
 
-Gemma 4 is constrained by `config/intent.gbnf` so it can only emit `{"command": "<intent>", "object": "<words>", "heard": "<words>"}`. `stop robot` is a keyword on the text Gemma returns and interrupts the running behavior. "stop" alone is not a command.
+Gemma 4 is constrained by `config/intent.gbnf` so it can only emit the list `["<intent>", "<object words>", "<words heard>"]`. `stop robot` is a keyword on the text Gemma returns and interrupts the running behavior. "stop" alone is not a command.
 
 | Say something like | Intent | What happens |
 |---|---|---|
@@ -161,7 +161,7 @@ The pipeline is powered by AI models that utilize every subsystem of the APU. Ea
 </thead>
 <tbody>
 <tr style="background-color: rgba(0, 0, 0, 0)"><td rowspan="2" valign="top" style="background-color: rgba(128, 128, 128, 0.2); vertical-align: top; border: 1px solid rgba(128, 128, 128, 0.4)">Voice control</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">Silero VAD</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">marks 20 ms frames that contain speech</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">CPU</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">ONNX Runtime</td></tr>
-<tr style="background-color: rgba(0, 0, 0, 0)"><td style="border: 1px solid rgba(128, 128, 128, 0.4)">Gemma 4 E4B-IT (Q4_0)</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">a hop of audio → command</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">iGPU</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)"><code>llama.cpp</code> <code>llama-server</code> (HIP) and the audio projector</td></tr>
+<tr style="background-color: rgba(0, 0, 0, 0)"><td style="border: 1px solid rgba(128, 128, 128, 0.4)">Gemma 4 E4B-IT (Q4_0)</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">an utterance of audio → command</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">iGPU</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)"><code>llama.cpp</code> <code>llama-server</code> (HIP) and the audio projector</td></tr>
 <tr style="background-color: rgba(0, 0, 0, 0)"><td rowspan="2" valign="top" style="background-color: rgba(128, 128, 128, 0.2); vertical-align: top; border: 1px solid rgba(128, 128, 128, 0.4)">Gestures</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">YOLOv26s-pose</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">finds your body and wrist</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">NPU</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">ONNX Runtime, VitisAI EP</td></tr>
 <tr style="background-color: rgba(0, 0, 0, 0)"><td style="border: 1px solid rgba(128, 128, 128, 0.4)">MediaPipe Hands</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">detects the hand gesture (pinch, roll)</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">CPU</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">MediaPipe Tasks</td></tr>
 <tr style="background-color: rgba(0, 0, 0, 0)"><td rowspan="2" valign="top" style="background-color: rgba(128, 128, 128, 0.2); vertical-align: top; border: 1px solid rgba(128, 128, 128, 0.4)">Object localization</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">YOLOv26s-detect</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">finds the named object in the arm camera</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">NPU</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">ONNX Runtime, VitisAI EP</td></tr>
@@ -170,7 +170,7 @@ The pipeline is powered by AI models that utilize every subsystem of the APU. Ea
 </tbody>
 </table>
 
-A hop window goes to Gemma while the person is still talking. [Voice latency](#voice-latency) is that hop, and the samples in it are not denoised.
+An utterance goes to Gemma the moment the person falls silent. [Voice latency](#voice-latency) has the measured times; the samples are not denoised.
 
 Every NPU session is built through one shared factory (`vla_pipeline/utils/npu_session.py`), and each model's `device:` is set in `config/pipeline.yaml`.
 
@@ -294,7 +294,7 @@ vvla-pipeline/
 ├── workshop/                     # the hands-on workshop, with its own copy of the behavior code (common/)
 ├── config/
 │   ├── pipeline.yaml             # all tunables (cameras, gemma4-e4b-it, gesture_mimic, pick_place, grip, …)
-│   ├── intent.gbnf               # GBNF grammar: {"command","object","heard"}
+│   ├── intent.gbnf               # GBNF grammar: the list [command, object, words heard]
 │   └── vaiep_config.json         # VitisAI compiler config for YOLO (BF16, VAIML)
 ├── launch/
 │   ├── strix_vla.launch.py       # cameras (mount+arm) + SO-101 server node (or the twin) + controllers
@@ -314,7 +314,7 @@ vvla-pipeline/
     ├── dispatch.py               # transcript checks, stop fast path, behavior dispatch loop
     ├── console.py                # twin console window (--digital-twin)
     ├── audio/
-    │   └── gemma_listen.py       # Silero gate and hop windows (no wait for silence)
+    │   └── gemma_listen.py       # offset removal, the utterance cut, the level raise
     ├── llm/
     │   ├── intents.py            # Intent enum, ParsedCommand, CommandRegistry, system prompt
     │   ├── llama_intent.py       # llama-server lifecycle + Gemma audio and text parsing
@@ -490,11 +490,26 @@ Kept: **YOLOv26s-pose on the NPU for the body + MediaPipe Hands on CPU for the p
 
 ## Voice latency
 
-Gemma does not wait for the end of speech. Silero and a −35 dBFS check mark each 20 ms frame. A window of `window_s` (6 s) is sent every `hop_s` (2 s) once that hop holds at least `min_voice_ms` (100 ms) of speech, so the first clip waits 2 s and a short command fits inside it. At the tradeshow the arm moved about a second after the person stopped. `stop robot` is a keyword on the text Gemma returns, so the stop does not wait for another hop to be classified as a new command. "stop" alone does nothing.
+A sentence is sent the moment it has ended, and its command is acted on the moment Gemma has written it.
+
+1. **The utterance.** A constant offset is first taken out of the microphone's samples (a built-in microphone was measured to deliver samples around +1028, which alone reads −30 dBFS). Silero marks each 20 ms frame as speech or not. An utterance starts at the first speech frame, with `pre_roll_ms` (300 ms) of the sound before it, and is sent on the frame that completes `end_silence_ms` (300 ms) of silence: one request per sentence. Gemma takes a whole clip, not sound as it comes, so the end of the speech is the earliest moment a sentence can be sent. An utterance is at most `window_s` (6 s) long; one with less than `min_voice_ms` (100 ms) of speech is dropped. It is raised to a fixed level before it is sent, because Gemma hears quiet sound worse.
+2. **The answer.** Gemma writes the list `["<command>", "<object>", "<words heard>"]`, and the client reads it as it is written. The command and the object come first: the behavior starts when they are complete, while Gemma still writes the words it heard. The words are shown when they arrive. An utterance that holds no command ends its request there. A typed sentence ends its request at the command too.
+3. **The warm-up.** One request is sent when the server has started, so the first spoken command does not pay for the model reading in its instructions.
+
+Measured on a Strix Halo (Ryzen AI Max+ 395) with sentences of a synthetic voice played in real time through the listener and the real Gemma, from the end of a sentence to its command:
+
+| Listener | min / median / max |
+|---|---|
+| before: the last 6 s of sound sent every 2 s, the whole answer awaited | 0.87 / 2.01 / 2.22 s |
+| now: one utterance, the command acted on when written | 0.55 / 0.55 / 0.77 s |
+
+Of the 0.55 s, 0.3 s is the end silence and 0.23 to 0.25 s is the request up to the command; the words heard follow about 0.13 s later. Every command logs its own time: `Command 'home' 0.55 s after the end of the speech (request 0.25 s to the call)`. `tests/sim/test_voice_live.py` repeats the measurement. Not measured: a person at the microphone, and the times while the digital twin renders on the same iGPU.
+
+`stop robot` is a command Gemma returns like any other, so a stop takes the same time. "stop" alone does nothing.
 
 ### No denoiser
 
-Frames that pass Silero and the −35 dBFS check are sent as recorded. There is no noise-suppression stage. `vla_pipeline/llm/voice.py` already does that. Google's audio guide for Gemma 4 specifies one channel, 16 kHz, float samples from −1 to 1, and a Fourier resample. It does not specify a denoiser ([Audio understanding](https://ai.google.dev/gemma/docs/capabilities/audio)).
+An utterance is sent with the microphone's constant offset taken out and raised to a fixed level; nothing else is done to it. There is no noise-suppression stage. Google's audio guide for Gemma 4 specifies one channel, 16 kHz, float samples from −1 to 1, and a Fourier resample. It does not specify a denoiser ([Audio understanding](https://ai.google.dev/gemma/docs/capabilities/audio)).
 
 A cleaner in front of this model is a poor trade. Gemma 4 E4B is weaker on noisy spontaneous speech than on clean read speech, and it inserts words when the audio is hard ([Open ASR write-up](https://twango.dev/writing/gemma4-asr-benchmark)). A 20-clip noisy-English set measured 7.6% word error ([TypeWhisper](https://typewhisper.github.io/typewhisper-benchmark/?model=crispasr%3Agemma4-e4b-it-q8_0&view=model)). MetricGAN raised the error for Whisper, Parakeet, and Gemini on every noise condition tried, including clips that were already clean ([When De-noising Hurts](https://arxiv.org/html/2512.17562)). SAM-Audio separation raised the signal-to-noise ratio and still raised Whisper's word error ([When Audio Separation Hurts](https://arxiv.org/html/2603.04710v2)). On large audio-language models, ordinary denoisers sometimes made the internal noise measure worse ([SEE](https://arxiv.org/html/2601.07331)). The enhancer invents a spectrum the encoder was not trained on, and the language model then guesses the missing words.
 
@@ -502,7 +517,7 @@ A tradeshow floor is another person talking. Silero treats that as speech and pa
 
 ## Voice pick-and-place
 
-"Pick up the ball" → `{"command": "pick_place", "object": "ball"}` → `run_pick_place` in `vla_pipeline/behaviors/manipulation.py`: the arm walks `scan_pans` and stops at the first settled frame with a usable box, kept with the joints that took it → YOLOv26s-detect on the arm camera grounds the name (synonym table: ball→sports ball, mug→cup, …) → that box is located once on the table → one grasp solve → a joint-space descent → the same feedback-based close as grip, a short settle, a holding check (one fresh frame and one more locate if the grasp slips) → lift the grasp above the other objects and hold the object out toward the operator. The jaws stay closed.
+"Pick up the ball" → the command `pick_place` with the object `ball` → `run_pick_place` in `vla_pipeline/behaviors/manipulation.py`: the arm walks `scan_pans` and stops at the first settled frame with a usable box, kept with the joints that took it → YOLOv26s-detect on the arm camera grounds the name (synonym table: ball→sports ball, mug→cup, …) → that box is located once on the table → one grasp solve → a joint-space descent → the same feedback-based close as grip, a short settle, a holding check (one fresh frame and one more locate if the grasp slips) → lift the grasp above the other objects and hold the object out toward the operator. The jaws stay closed.
 
 **Locate:** objects rest on the table, so one camera is enough. Forward kinematics of the SO-101 model (`so101_sim/src/so101_sim/kinematics.py`) at the current joint angles gives the wrist camera's pose; rays through the YOLO box meet the table plane, then a class-specific footprint is fitted: sphere for a sports ball, upright bottle, or flat footprint for a book/toothbrush. For the elongated toothbrush, YOLO supplies the crop but not an angle: PCA on the pixels inside that crop finds its long image axis and camera rays carry it onto the table. **IK reach:** one five-joint constrained SQP solve uses MuJoCo's analytic point and angular Jacobians to put the point between the open jaws on the object, keep the closing axis horizontal, and (for a toothbrush) make the jaws close across its long axis. Beside a ball or other lying object, the hand then moves sideways at grasp height until the fixed finger is `fixed_jaw_gap_m` (5 mm) away, so the moving jaw only pushes the object that far instead of across half the jaw opening. Joint limits and a per-step trust region are hard constraints; geometric SO-101 elbow solutions seed the optimizer, while MuJoCo FK remains the source of truth. The jaws then open above the object and descend in joint space. Each step stays within 5 mm of the planned vertical and above the table; when a joint line leaves that band, the same bound is met with Cartesian steps. Reach is ~14–30 cm from the base. A box cut by the image edge is skipped and the next stored frame is located. An object that cannot be solved is out of reach, and the arm says so. Only the arm camera can locate an object, so with it offline the arm says so and does not pick.
 
@@ -544,6 +559,7 @@ Most components are standalone modules with their own `__main__` self-test. Pick
 |---|---|---|
 | Camera→joint mapping (One Euro/depth) | no (twin) | `./run_sim_tests.sh -k mimic` |
 | Intent grammar + parser | Gemma server running | `python -m vla_pipeline.llm.llama_intent --selftest` |
+| Spoken sentences → commands, with their times | no (a synthetic voice stands in for the microphone; the real Gemma on the iGPU) | `./run_sim_tests.sh -k voice_live -s` |
 | YOLO pose | webcam | `python -m vla_pipeline.vision.yolo_pose_npu --device npu` |
 | YOLO detect | webcam | `python -m vla_pipeline.vision.yolo_detect_npu --find ball --role arm` |
 | MediaPipe hands | webcam | `python -m vla_pipeline.vision.mediapipe_hands` |
@@ -581,7 +597,7 @@ cd workshop && ./run_notebooks.sh --test    # notebooks and the Instructor's cor
 
 `./run_sim_tests.sh` uses the same `.venv`, Ryzen AI runtime, and ROS 2. It runs `pytest tests/npu`, then `pytest tests/sim -m "sim and not docs"`. Arguments after the command go to the twin tests only. It does not start llama-server or Jupyter, and it does not run the tests marked `docs` (the notebooks, the Instructor's corner, and the notebook console). Those belong to `./run_notebooks.sh --test`, which stands in a generated frame for the webcam and a scripted person for pose. The notebook reads that frame in this process. It does not open `/dev/video0` or wait on `/cameras/mount/image_raw`.
 
-Spoken commands are injected as text. The operator's pose and hands are scripted. The arm camera is read by YOLO on the NPU (`--sim-eyes seg` substitutes the twin's segmentation boxes). The twin stands in for the arm and its camera, and its rendering runs on the iGPU. No arm, camera, or microphone has to be attached. The ROS cases run headless on a private ROS domain, and the exit code is the result.
+Spoken commands are injected as text, except in `tests/sim/test_voice_live.py`: there a stand-in microphone plays six sentences of a synthetic voice (espeak-ng, `libespeak-ng1`) in real time through the real listener, and a `llama-server` the test starts answers them with the real Gemma. The operator's pose and hands are scripted. The arm camera is read by YOLO on the NPU (`--sim-eyes seg` substitutes the twin's segmentation boxes). The twin stands in for the arm and its camera, and its rendering runs on the iGPU. No arm, camera, or microphone has to be attached. The ROS cases run headless on a private ROS domain, and the exit code is the result.
 
 Spoken commands, and how each one is checked. A cell is blank when that stack does not run the case. "Parks at rest" means the body joints finish within 4° of the rest pose.
 
@@ -639,7 +655,7 @@ Arguments after `./run_sim_tests.sh` select twin tests, for example `./run_sim_t
 
 All tunables live in `config/pipeline.yaml`:
 
-- **gemma4-e4b-it** — GGUF, audio projector, Silero path, `window_s` (6), `hop_s` (2), `min_dbfs` (−35), `llama-server` port 8082, GPU layers, ctx size, GBNF path, `hsa_override_gfx_version`
+- **gemma4-e4b-it** — GGUF, audio projector, Silero path, the utterance cut (`end_silence_ms` 300, `pre_roll_ms` 300, `window_s` 6, `min_voice_ms` 100, `min_dbfs` −60), the level an utterance is sent at (`sent_peak`, `most_gain`), `llama-server` port 8082, GPU layers, ctx size, GBNF path, `hsa_override_gfx_version`
 - **audio** — sample rate (16 kHz) and which microphone
 - **yolo_pose / yolo_detect / mediapipe** — confidence thresholds, cache keys, hand-roll cue threshold
 - **cameras** — per-role (`mount` / `arm`) device, resolution, fps, rotation, `use_ros2`, topic; legacy single `camera:` kept for one-cam dev machines
@@ -671,6 +687,7 @@ All tunables live in `config/pipeline.yaml`:
 - **Arm doesn't move** — verify `motor_port` permissions and that your calibration JSON matches `robot_id`.
 - **`ControllerArm` times out waiting for the controllers** — `ros2 control list_controllers` should show `arm_controller`, `gripper_forward_controller` and `joint_state_broadcaster` active. `ros_ws/install/topic_based_ros2_control is missing` means the hardware plugin was never built: rerun `./bootstrap.sh` (section 4e). `./scripts/validate_setup.sh` checks ROS 2, ros2_control and the plugin.
 - **Gripper trips `Overload error` on shutdown** — usually a side effect of an abnormal exit while the arm was parking; once the run exits cleanly it goes away. If it recurs, power-cycle the servo bus to clear the overload latch before the next run.
-- **The first words of a command win, or the arm feels late** — `gemma4-e4b-it.hop_s` is 2 so a short command fits in the first clip. Raising it waits longer before the first window. The samples are not denoised; a second person talking is speech and is sent with the command.
+- **A sentence is cut in two, or the arm feels late** — a sentence is sent once the speaker has been silent for `gemma4-e4b-it.end_silence_ms` (300). Raising it waits longer after the last word; lowering it sends sooner and cuts a sentence at a shorter pause (a pause after a comma is 220 to 260 ms). The log line "Command … N s after the end of the speech" gives the time of every command. The samples are not denoised; a second person talking is speech and is sent with the command.
+- **Speech is not picked up in a loud room, or the room is taken for speech** — `gemma4-e4b-it.min_dbfs` (−60) leaves the decision to Silero. Raise it only where the room is loud; a quiet microphone's speech frames are around −43 dBFS.
 - **Gripper drops thin objects** — raise `grip.stall_grace_s` and/or lower `grip.load_threshold`; verify effort feedback with `python -m vla_pipeline.robot.arm_interface --dry-run` (prints whether the gripper load register is readable).
 - **Arm camera image is sideways** — set `cameras.arm.rotate` (0/90/180/270) to match the end-effector mounting.

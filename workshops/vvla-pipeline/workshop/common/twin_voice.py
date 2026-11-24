@@ -39,6 +39,14 @@ MIC_OPEN_S = 1.0
 REPORT_RECORDS = False
 
 
+class _Words(str):
+    """The words Gemma heard in the spoken command delivered just before them.
+
+    A spoken command arrives the moment Gemma has written its call; the words follow when
+    the answer is complete, once for every command (empty when Gemma made out none).
+    """
+
+
 def keyword_parse(text: str) -> ParsedCommand:
     """The stand-in for Llama: match keywords in the text."""
     d = offline_parse_text(text)
@@ -94,7 +102,9 @@ class VoiceCommands:
         from vla_pipeline.utils.config import load_config
 
         session = open_voice(load_config())
-        session.start(self._utterance, on_level=console.on_level, on_drop=self._dropped)
+        session.start(
+            self._utterance, on_level=console.on_level, on_drop=self._dropped, on_heard=self._words,
+        )
         if session.error:
             print(f"voice model unavailable ({session.error}) - a keyword match picks the commands")
             self._parse_fallback = keyword_parse
@@ -116,6 +126,14 @@ class VoiceCommands:
             listening.put(text)
         elif self._live.is_set():
             self.on_transcript(text)
+
+    def _words(self, words: str) -> None:
+        """The words of the spoken command just delivered: to listen() while it waits, else to the console."""
+        listening = self._listening
+        if listening is not None:
+            listening.put(_Words(words))
+        elif self._live.is_set() and words:
+            self.console.heard(words)
 
     def _dropped(self, reason: str) -> None:
         """Speech that never became a transcript: shown where a transcript would have gone."""
@@ -152,6 +170,8 @@ class VoiceCommands:
             print(f'Without a microphone, here is a typed sentence: "{example}"')
             self._explain(example)
             return
+        from vla_pipeline.llm.llama_intent import REQUEST_TIMEOUT_S
+
         print(f'Say a command, for example "pick up the ball". Listening for {seconds:.0f} s...')
         heard: queue.Queue[str] = queue.Queue()
         self._listening = heard
@@ -162,9 +182,20 @@ class VoiceCommands:
                     text = heard.get(timeout=left)
                 except queue.Empty:
                     break
+                if isinstance(text, _Words):
+                    continue  # the words of a command delivered before this cell listened
                 spoken = command_from_json(text)
-                if spoken is not None and spoken.transcript:
-                    print(f'Heard: "{spoken.transcript}"')
+                words = spoken.transcript if spoken is not None else ""
+                if spoken is not None and not words:
+                    # The command came at Gemma's call. Its words follow when the answer is
+                    # complete: the session sends them once for every command, so this is one
+                    # wait for that event, bounded by the request's own time limit.
+                    try:
+                        words = heard.get(timeout=REQUEST_TIMEOUT_S)
+                    except queue.Empty:
+                        words = ""
+                if words:
+                    print(f'Heard: "{words}"')
                 elif text.startswith("{"):
                     print(f"Heard a command: {text}")
                 else:
@@ -187,7 +218,9 @@ class VoiceCommands:
             self.console.ignored(text)
             return
         spoken = command_from_json(text)
-        self.console.heard(spoken.transcript if spoken is not None and spoken.transcript else text)
+        # A spoken command arrives at Gemma's call, before its words: _words shows them when they come.
+        if spoken is None or spoken.transcript:
+            self.console.heard(spoken.transcript if spoken is not None else text)
         if is_stop(text):
             self.console.stopped()
             self._handle(self.ctx, text, self.parse)  # ctx.request_stop(): the running behavior ends

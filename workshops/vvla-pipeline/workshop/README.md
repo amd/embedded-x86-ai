@@ -3,7 +3,7 @@
 A 3-hour workshop that takes a CS/engineering student from zero to a
 running **vision -> language -> action** pipeline on an AMD Ryzen AI
 APU driving a LeRobot SO-101 arm: YOLOv26s x2 on the **NPU** (VitisAI EP),
-Gemma 4 E4B on the **iGPU** (llama.cpp + ROCm, one hop of audio),
+Gemma 4 E4B on the **iGPU** (llama.cpp + ROCm, one spoken sentence at a time),
 Silero on the **CPU**, MediaPipe Hands on the **CPU**, all wired over **ROS 2**.
 
 The workshop depends on [Installation](../README.md#installation). That

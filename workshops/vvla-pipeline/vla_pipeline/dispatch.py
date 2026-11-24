@@ -88,7 +88,9 @@ class Dispatcher:
         """Gate one transcript (grace, stop, noise) and queue it for dispatch."""
         logger.info("Heard: %r", text)
         spoken = command_from_json(text)
-        self._emit("heard", text=spoken.transcript if spoken is not None and spoken.transcript else text)
+        # A spoken command arrives at Gemma's call, before its words: :meth:`heard` follows with them.
+        if spoken is None or spoken.transcript:
+            self._emit("heard", text=spoken.transcript if spoken is not None else text)
         if self._clock() - self.start_time < self.startup_grace_s:
             logger.info("Ignoring %r (startup grace period).", text)
             self._emit("ignored", text=text, reason="grace")
@@ -130,6 +132,16 @@ class Dispatcher:
             logger.info("New command while %s runs - stopping it to switch.",
                         self.current.intent.value if self.current else "a behavior")
             self.ctx.stop_event.set()
+
+    def heard(self, words: str) -> None:
+        """The words of the spoken command last given to :meth:`on_transcript`.
+
+        Gemma writes them after the call, so they arrive after the command is queued. Shown
+        to the listeners; nothing is run from them. Empty words (Gemma made out none) show
+        nothing.
+        """
+        if words:
+            self._emit("heard", text=words)
 
     def _mimic_running(self) -> bool:
         """True while the behavior on the dispatch thread is gesture mimic."""

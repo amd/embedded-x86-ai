@@ -25,7 +25,7 @@ flowchart TB
 
     subgraph THINK["Language &amp; routing"]
         GEMMA["Gemma 4 E4B<br/>speech and intent<br/>(iGPU, GBNF)"]:::gpu
-        STOPCHK{{"stop robot?<br/>(text Gemma returned)"}}:::gate
+        STOPCHK{{"stop robot?<br/>(Gemma's stop command)"}}:::gate
         REG["CommandRegistry<br/>dispatch (main thread)"]:::cpu
     end
 
@@ -122,7 +122,7 @@ flowchart LR
 
 ## Voice commands → behaviors
 
-Gemma 4 is constrained by `config/intent.gbnf` so it can only emit the list `["<intent>", "<object words>", "<words heard>"]`. `stop robot` is a keyword on the text Gemma returns and interrupts the running behavior. "stop" alone is not a command.
+Gemma 4 is constrained by `config/intent.gbnf` so it can only emit the list `["<intent>", "<object words>", "<words heard>"]`. A spoken "stop robot" is Gemma's `stop` command; a typed one is matched as a keyword before Gemma is asked. Either interrupts the running behavior. "stop" alone is not a command.
 
 | Say something like | Intent | What happens |
 |---|---|---|
@@ -134,7 +134,7 @@ Gemma 4 is constrained by `config/intent.gbnf` so it can only emit the list `["<
 | "dance", "show me some moves" | `dance` | BPM-paced keyframe choreography. |
 | "wave at me", "say hi" | `wave` | Raises the arm and waves `behaviors.wave.cycles` times. |
 | "go home" | `home` | Returns to the rest pose. "home" or "reset" alone is not a command. |
-| "stop robot" | `stop` | **Keyword-matched on the text Gemma returns** and interrupts any running behavior immediately. "stop" alone is not a command. |
+| "stop robot" | `stop` | **Interrupts any running behavior immediately.** Spoken, it is Gemma's `stop` command; typed, it is matched as a keyword before Gemma is asked. "stop" alone is not a command. |
 
 ## Tested environment
 
@@ -144,6 +144,8 @@ Gemma 4 is constrained by `config/intent.gbnf` so it can only emit the list `["<
 | OS | Ubuntu 24.04 |
 | ROCm | 7.2.4 |
 | Ryzen AI SW | 1.7.1 (VitisAI ONNX Runtime EP) |
+| llama.cpp | build 12720 (commit `33aeb17`), built with HIP; Gemma 4 audio needs commit `547765a` or newer |
+| Voice model | Gemma 4 E4B-IT, Q4_0 GGUF, with its Q8_0 audio projector (`ggml-org/gemma-4-E4B-it-GGUF`) |
 | ROS 2 | Jazzy (required), with ros2_control and the controllers |
 | LeRobot | v0.6.0 source, installed without its dependency set. The Feetech SDK is installed separately. |
 | PyTorch | 2.11.0+rocm7.13.0 from `repo.amd.com/rocm/whl/<detected gfx>`. The PyPI wheel is not used; it downloads the NVIDIA CUDA stack. |
@@ -308,7 +310,7 @@ vvla-pipeline/
 │   ├── ryzen_ai_env.sh           # LD_LIBRARY_PATH for the VitisAI EP runtime
 │   ├── verify_npu_stack.py       # check that the VitisAI EP loads
 │   ├── validate_setup.sh         # check scripts, SDK, caches and .venv
-│   └── install_kernel.sh         # register .venv Jupyter kernel; ensure_voice.sh starts Gemma
+│   └── install_kernel.sh         # register .venv Jupyter kernel; ensure_voice.sh checks the voice files
 └── vla_pipeline/
     ├── main.py                   # orchestrator: handler registry, listener thread
     ├── dispatch.py               # transcript checks, stop fast path, behavior dispatch loop
@@ -501,11 +503,16 @@ Measured on a Strix Halo (Ryzen AI Max+ 395) with sentences of a synthetic voice
 | Listener | min / median / max |
 |---|---|
 | before: the last 6 s of sound sent every 2 s, the whole answer awaited | 0.87 / 2.01 / 2.22 s |
-| now: one utterance, the command acted on when written | 0.55 / 0.55 / 0.77 s |
+| now: one utterance, the command acted on when written | 0.45 / 0.46 / 0.71 s |
 
-Of the 0.55 s, 0.3 s is the end silence and 0.23 to 0.25 s is the request up to the command; the words heard follow about 0.13 s later. Every command logs its own time: `Command 'home' 0.55 s after the end of the speech (request 0.25 s to the call)`. `tests/sim/test_voice_live.py` repeats the measurement. Not measured: a person at the microphone, and the times while the digital twin renders on the same iGPU.
+The second row was measured on 2026-11-25 with llama.cpp build 12720; an earlier build, 11548, gave 0.55 / 0.55 / 0.77 s for the same listener. Of the 0.46 s, 0.3 s is the end silence and 0.15 s is the request up to the command; the words heard follow 0.11 to 0.16 s later. The slowest of the six sentences is "pick up the ball", the first one and the only one with an object: its request takes 0.39 s to the command. Every command logs its own time: `Command 'home' 0.46 s after the end of the speech (request 0.15 s to the call)`. `tests/sim/test_voice_live.py` repeats the measurement.
 
-`stop robot` is a command Gemma returns like any other, so a stop takes the same time. "stop" alone does nothing.
+Two more measurements, both on the same machine:
+
+- **A person at the microphone, with two talk shows playing beside it** (2026-11-25, the digital twin notebook running, the first 14 minutes, times from the `llama-server` log). Of 96 requests, 67 ended at the call, which is where a sentence without a command ends: 0.21 / 0.24 / 0.34 s (min / median / max). The 29 spoken commands were read to the end, words included, in 0.29 / 0.44 / 0.56 s. The person reported that the commands were understood over the other voices. The time from the end of a spoken sentence to its command was not logged in that session.
+- **While the digital twin renders on the same iGPU.** A spoken clip's request takes 3 % longer up to the command: 0.227 s instead of 0.220 s (median), with the twin rendering its wrist, mount and 3-D views.
+
+A spoken "stop robot" is a command Gemma returns like any other, so a stop takes the same time. "stop" alone does nothing.
 
 ### No denoiser
 
@@ -549,7 +556,7 @@ the scan says it cannot see a bottle and the grasp never starts.
 2. Add the name to the `cmd` rule in `config/intent.gbnf`.
 3. Register a handler in `vla_pipeline/main.py`: `@registry.register(Intent.MY_COMMAND)` — it receives `(ctx, cmd)` with the arm, cameras, models, `cmd.params`, and `ctx.stop_check`.
 
-`wave` and `home` (`vla_pipeline/behaviors/simple.py`) are the template. `stop robot` is keyword-matched on the text Gemma returns and interrupts any running behavior — including mid-move (every move's wait checks `stop_check`). "stop" alone is not a command.
+`wave` and `home` (`vla_pipeline/behaviors/simple.py`) are the template. `stop robot` (Gemma's `stop` command when spoken, a keyword match when typed) interrupts any running behavior — including mid-move (every move's wait checks `stop_check`). "stop" alone is not a command.
 
 ## Testing each component independently
 
@@ -593,9 +600,9 @@ cd workshop && ./run_notebooks.sh --test    # notebooks and the Instructor's cor
 ./run_sim_tests.sh                          # NPU load order and the twin stacks
 ```
 
-`./run_notebooks.sh --test` does the setup [workshop/README.md](workshop/README.md) describes: the `.venv`, the Ryzen AI runtime, ROS 2, the `vvla-workshop` kernel and llama-server on the iGPU. Then it runs the notebooks in `workshop/notebooks/`, in the README's order, and the README's Instructor's corner commands. The notebooks need llama-server, which that command starts.
+`./run_notebooks.sh --test` does the setup [workshop/README.md](workshop/README.md) describes: the `.venv`, the Ryzen AI runtime, ROS 2, the `vvla-workshop` kernel, and the check of the Gemma files and `llama-server` (`scripts/ensure_voice.sh`). Then it runs the notebooks in `workshop/notebooks/`, in the README's order, and the README's Instructor's corner commands. A notebook that needs Gemma starts its own `llama-server`.
 
-`./run_sim_tests.sh` uses the same `.venv`, Ryzen AI runtime, and ROS 2. It runs `pytest tests/npu`, then `pytest tests/sim -m "sim and not docs"`. Arguments after the command go to the twin tests only. It does not start llama-server or Jupyter, and it does not run the tests marked `docs` (the notebooks, the Instructor's corner, and the notebook console). Those belong to `./run_notebooks.sh --test`, which stands in a generated frame for the webcam and a scripted person for pose. The notebook reads that frame in this process. It does not open `/dev/video0` or wait on `/cameras/mount/image_raw`.
+`./run_sim_tests.sh` uses the same `.venv`, Ryzen AI runtime, and ROS 2. It runs `pytest tests/npu`, then `pytest tests/sim -m "sim and not docs"`. Arguments after the command go to the twin tests only. It does not start Jupyter (the one `llama-server` in it is the one `tests/sim/test_voice_live.py` starts for itself), and it does not run the tests marked `docs` (the notebooks, the Instructor's corner, and the notebook console). Those belong to `./run_notebooks.sh --test`, which stands in a generated frame for the webcam and a scripted person for pose. The notebook reads that frame in this process. It does not open `/dev/video0` or wait on `/cameras/mount/image_raw`. A notebook under test has no microphone (opening one fails, as on a machine without one) and asks Gemma on a free port of its own, so it neither hears the room nor shares a `llama-server` with a notebook open on the same machine.
 
 Spoken commands are injected as text, except in `tests/sim/test_voice_live.py`: there a stand-in microphone plays six sentences of a synthetic voice (espeak-ng, `libespeak-ng1`) in real time through the real listener, and a `llama-server` the test starts answers them with the real Gemma. The same file asks the real Gemma the typed stop sentences: "stop robot" in four forms must stop, and "stop", "halt", "freeze", "stop it", "abort" and "stop talking" must do nothing. The operator's pose and hands are scripted. The arm camera is read by YOLO on the NPU (`--sim-eyes seg` substitutes the twin's segmentation boxes). The twin stands in for the arm and its camera, and its rendering runs on the iGPU. No arm, camera, or microphone has to be attached. The ROS cases run headless on a private ROS domain, and the exit code is the result.
 
@@ -666,10 +673,10 @@ All tunables live in `config/pipeline.yaml`:
 ## Architecture notes
 
 - **Transport-agnostic behaviors.** Behaviors only ever talk to the `ArmClient` ABC and the `CameraClient` ABC. The same behavior code runs over ROS 2 (`Ros2ArmClient` → the ros2_control controllers → `So101ServerNode`, which exclusively owns the Feetech bus), direct serial (`DirectArm` → LeRobot `SO101Follower`, owned by a thread of the orchestrator), the digital twin (`SimArmClient`), or `DryRunArm` for development; cameras likewise over ROS 2 topics or direct V4L2. A move ends when the arm's owner reports it over (the trajectory controller's result, or the servos' `Moving` flags), and the loops that sample the arm wait for the owner's next state.
-- **Grammar-constrained intent.** llama.cpp's GBNF support means the LLM physically cannot emit anything but one of the command JSONs (`gesture_mimic`, `fetch_block`, `pick_place`, `dance`, `grip`, `release`, `wave`, `home`, `stop`, `unknown`) with an `object` slot.
+- **Grammar-constrained intent.** llama.cpp's GBNF support means Gemma physically cannot emit anything but the list `["<command>", "<object>", "<words heard>"]`, with one of the ten commands (`gesture_mimic`, `fetch_block`, `pick_place`, `dance`, `grip`, `release`, `wave`, `home`, `stop`, `unknown`) first.
 - **Registry dispatch.** The orchestrator never hardcodes behaviors; handlers register on a `CommandRegistry`, so adding a command never touches `main.py`'s dispatch loop.
 - **Grip-lock.** `grip` and `pick_place` record the held position in shared state, so a second "hold this" is refused while the arm holds something. `release` ("release", "open", "drop it") clears the lock and opens the jaws where they are. `gesture_mimic` clears it too and hands the gripper to your pinch.
-- **Safety.** All joint targets pass through `clamp_joints` against per-joint limits; `max_relative_target` bounds per-tick deltas at the LeRobot layer; "stop robot" is a keyword fast path on the text Gemma returns and sets a shared stop event every move and wait checks (a trajectory goal is cancelled, and the arm holds where it is); `q` in any preview window and Ctrl-C are equivalent; the server node parks the arm at `REST_POSE` on any shutdown path; crashed behaviors are caught by the orchestrator, which parks the arm.
+- **Safety.** All joint targets pass through `clamp_joints` against per-joint limits; `max_relative_target` bounds per-tick deltas at the LeRobot layer; "stop robot" (Gemma's `stop` command when spoken, a keyword match when typed) is acted on before any other command and sets a shared stop event every move and wait checks (a trajectory goal is cancelled, and the arm holds where it is); `q` in any preview window and Ctrl-C are equivalent; the server node parks the arm at `REST_POSE` on any shutdown path; crashed behaviors are caught by the orchestrator, which parks the arm.
 
 ## Troubleshooting
 

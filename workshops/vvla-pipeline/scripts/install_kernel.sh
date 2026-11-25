@@ -9,7 +9,7 @@
 
 # =============================================================================
 # install_kernel.sh - register the repo's .venv as a Jupyter kernel.
-# scripts/ensure_voice.sh starts the Gemma 4 server the notebooks use.
+# scripts/ensure_voice.sh checks the Gemma 4 files and llama-server the notebooks use.
 #
 # Why this exists: running `jupyter notebook` from inside the venv is not
 # enough. Jupyter (and VS Code, and JupyterLab) launch notebooks with whatever
@@ -26,8 +26,9 @@
 # directly and source nothing - so without baking, the same notebook opened in
 # VS Code loses the NPU and rclpy. Baking makes every launcher behave the same.
 #
-# scripts/ensure_voice.sh (called below) starts the Gemma 4 llama-server
-# the notebooks talk to. This script does not start a second model.
+# scripts/ensure_voice.sh (called below) checks the Gemma 4 files and the
+# built llama-server. Neither script starts the server: a notebook that
+# needs Gemma starts it, and stops it when it closes.
 #
 # Usage:
 #   ./scripts/install_kernel.sh              # kernel + env bake + Gemma voice models
@@ -237,9 +238,8 @@ print("    wrote %s" % path)
 PYEOF
 fi
 
-# Gemma's llama-server is started by ensure_voice.sh above. This script
-# does not start a second one.
-LLM_STATUS="started by scripts/ensure_voice.sh (Gemma 4 on the iGPU)"
+# Gemma's llama-server is started by the notebook that needs it, not here.
+LLM_STATUS="started by the notebook that needs it (Gemma 4 on the iGPU)"
 
 # 5. Sanity report: does THIS kernel actually see the accelerator stack?
 #    Reflect the same env we baked into kernel.json so the report matches what
@@ -328,5 +328,6 @@ In VS Code:
   shows "NPU (VitisAI execution provider) [on]" in VS Code too - not only when
   launched via run_notebooks.sh.
 
-To stop the server later:  pkill -f llama-server
+A notebook stops the llama-server it started when it closes its voice session.
+One left behind by a killed kernel:  pkill -f llama-server
 EOF

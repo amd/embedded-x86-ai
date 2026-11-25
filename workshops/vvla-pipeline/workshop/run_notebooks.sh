@@ -22,8 +22,9 @@
 #      launch (scripts/install_kernel.sh --register-only). That kernel.json is
 #      shared by every clone on this machine, so a launch must rewrite it.
 #   4. Sources ROS 2 (required) so the notebook kernel gets rclpy + DDS.
-#   5. scripts/ensure_voice.sh (sourced above the Jupyter launch) starts the
-#      Gemma 4 llama-server. This script does not start a second model.
+#   5. scripts/ensure_voice.sh (run above the Jupyter launch) checks the
+#      Gemma 4 files and the built llama-server. A notebook that needs Gemma
+#      starts the server itself.
 #   6. Opens the always-on-top resource HUD (CPU% / GPU% / NPU inf/s) so you
 #      can watch the devices light up while a cell runs. It closes with Jupyter.
 #   7. Launches Jupyter Lab in workshop/ (browse the notebooks/ folder).

@@ -12,7 +12,7 @@ Section 4 of ``notebooks/03_integration/02_digital_twin.ipynb`` builds one
 typed, goes to :meth:`VoiceCommands.on_transcript`: "stop" acts at once,
 noise is shown and dropped, anything else waits in a queue. :meth:`VoiceCommands.dispatch_loop`
 runs the newest waiting command through the workshop's ``handle_transcript``
-(``integration/dispatch.py``), with Llama on the iGPU picking the command.
+(``integration/dispatch.py``), with Gemma 4 on the iGPU picking the command.
 :meth:`VoiceCommands.listen` takes one sentence before the console runs: it
 prints what was heard and the command Gemma picks, and runs nothing.
 """
@@ -48,7 +48,7 @@ class _Words(str):
 
 
 def keyword_parse(text: str) -> ParsedCommand:
-    """The stand-in for Llama: match keywords in the text."""
+    """The stand-in for Gemma: match keywords in the text."""
     d = offline_parse_text(text)
     params = {"object": d["object"]} if d.get("object") else {}
     return ParsedCommand(Intent.from_string(d["command"]), params=params, transcript=text)
@@ -153,7 +153,7 @@ class VoiceCommands:
         t0 = time.perf_counter()
         cmd = self._parse_intent(text)
         ms = 1000 * (time.perf_counter() - t0)
-        who = "Llama" if self.llm is not None else "The keyword match"
+        who = "Gemma" if self.llm is not None else "The keyword match"
         if cmd.intent is Intent.UNKNOWN:
             print(f"{who} found no command in it ({ms:.0f} ms).")
             return
@@ -204,7 +204,7 @@ class VoiceCommands:
                     print("That is noise, so it is ignored. Say a command.")
                     continue
                 if is_stop(text):
-                    print("That is a stop: it acts at once, without asking Llama.")
+                    print("That is a stop: it acts at once, without asking Gemma.")
                 else:
                     self._explain(text)
                 return

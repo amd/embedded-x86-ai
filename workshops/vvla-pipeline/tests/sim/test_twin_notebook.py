@@ -23,8 +23,8 @@ twin taken by this process, and the kernel namespace once the session ends.
 
 The in-memory copy of the notebook starts with ``RIG_STANDINS``
 (:mod:`notebook_harness`): a generated frame is the webcam, pose comes from
-``ScriptedPose``, and there is no microphone. Whisper, Llama on the iGPU
-and the YOLO sessions on the NPU are real. Arm-camera detection still runs
+``ScriptedPose``, and there is no microphone. Gemma 4 on the iGPU (a
+llama-server of the kernel's own) and the YOLO sessions on the NPU are real. Arm-camera detection still runs
 the detector. The file on disk is not changed.
 
 ``cd workshop && ./run_notebooks.sh --test``

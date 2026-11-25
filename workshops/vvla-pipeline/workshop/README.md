@@ -41,9 +41,10 @@ Before the steps below, install the Ryzen AI SDK and prerequisites as described 
 ```bash
 cd workshop
 ./run_notebooks.sh                        # registers the kernel, installs missing
-                                          # deps, starts the llama server and the
-                                          # resource HUD, then serves Jupyter Lab.
-                                          # This shell stays here until you quit it.
+                                          # deps, checks the Gemma 4 files, starts
+                                          # the twin and the resource HUD, then
+                                          # serves Jupyter Lab. This shell stays
+                                          # here until you quit it.
 ```
 
 Jupyter opens `notebooks/`. Read and run them in order: `01_ai_models`,

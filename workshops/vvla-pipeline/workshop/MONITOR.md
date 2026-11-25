@@ -5,7 +5,7 @@ and shows just three numbers:
 
 - **CPU %** in **burgundy** — busy % from `top`
 - **GPU %** in **orange** — busy % from the amdgpu `gpu_busy_percent` sysfs gauge,
-  which counts ROCm/HIP compute (the Llama-on-iGPU load), not just the graphics
+  which counts ROCm/HIP compute (the load of Gemma 4 on the iGPU), not just the graphics
   pipe `radeontop` sees; `radeontop` is used as a fallback
 - **NPU inf/s** (or **Idle**) in **cyan** — inferences/sec from the change in
   `xrt-smi`'s `command_completions` counter across the NPU's hardware contexts

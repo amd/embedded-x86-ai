@@ -22,7 +22,9 @@ and ``REPORT`` last. The rig's hardware is replaced, nothing else:
   turns the mount camera's ``use_ros2`` off, so the notebook does not wait on
   ``/cameras/mount/image_raw`` or ``/dev/video0``. Pose comes from
   ``common.fixtures.ScriptedPose`` (the real pose session still opens),
-* the microphone: none (Whisper still loads; Llama stays real).
+* the microphone: none. ``sounddevice.RawInputStream`` fails as on a machine
+  without one, so the console falls back to typing. Gemma stays real, on a
+  llama-server of the kernel's own, on a free port.
 
 ``RIG_STANDINS`` also records every ONNX Runtime session the kernel makes,
 with the provider it got, so a test can check where YOLO ran, and turns on
@@ -72,7 +74,6 @@ RIG_STANDINS = '''\
 #   webcam           -> generated frame in this process (mount use_ros2 off)
 #   microphone       -> none
 import sys as _sys
-import threading as _threading
 import time as _time
 from pathlib import Path as _Path
 
@@ -94,17 +95,36 @@ _ort.InferenceSession = _RecordedSession
 
 _sys.path.insert(0, str((_Path.cwd() / ".." / ".." / "solution").resolve()))
 @@APPLY_NOTEBOOK_STANDINS@@
+import socket as _socket
+
 import common.config as _config
-import common.speech as _speech
+import vla_pipeline.utils.config as _pipeline_config
+
+# Gemma on a port of this kernel's own. On the configured port the kernel would share a
+# llama-server with a notebook someone has open on this machine: whichever started it stops
+# it when it closes, and the other is left without one.
+with _socket.socket() as _sock:
+    _sock.bind(("127.0.0.1", 0))
+    _GEMMA_PORT = _sock.getsockname()[1]
 
 _load_config = _config.load_config
+_load_pipeline_config = _pipeline_config.load_config
 
 
 def _twin_config(path=None):
-    return apply_notebook_standins(_load_config(path))
+    cfg = apply_notebook_standins(_load_config(path))
+    cfg["gemma4-e4b-it"]["port"] = _GEMMA_PORT
+    return cfg
+
+
+def _pipeline_config_own_gemma(path=None):
+    cfg = _load_pipeline_config(path)
+    cfg["gemma4-e4b-it"]["port"] = _GEMMA_PORT
+    return cfg
 
 
 _config.load_config = _twin_config
+_pipeline_config.load_config = _pipeline_config_own_gemma
 
 import models.vision as _vision
 from common.fixtures import ScriptedPose as _ScriptedPose
@@ -165,22 +185,16 @@ class _PhotoCamera:
 _cv2.VideoCapture = _PhotoCamera
 
 
-class _NoMic:
-    error = "no microphone in the notebook test"
-    transcribing = False
-
-    def __init__(self, *args, **kwargs):
-        self.opened = _threading.Event()
-        self.opened.set()  # tried, and failed: see error
-
-    def start(self):
-        return self
-
-    def stop(self):
-        pass
+import sounddevice as _sounddevice
 
 
-_speech.MicListener = _NoMic
+def _no_microphone(*args, **kwargs):
+    """The speech front end opens its microphone here (vla_pipeline/llm/voice.py). It fails as
+    on a machine without one, so the kernel never hears the room it runs in."""
+    raise _sounddevice.PortAudioError("no microphone in the notebook test")
+
+
+_sounddevice.RawInputStream = _no_microphone
 
 import common.twin_voice as _twin_voice
 

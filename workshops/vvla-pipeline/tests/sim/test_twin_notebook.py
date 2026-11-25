@@ -92,8 +92,12 @@ print("NS " + _json.dumps({
     "log": [line for line, _color in console._log],
     "pid": owner(int(os.environ.get("ROS_DOMAIN_ID", "0"))),
     "sessions": _SESSIONS,
+    "gemma_port": voice.llm.port,
+    "microphone": voice.mic.error,
 }))
 '''
+# What the kernel's speech front end reports for its microphone (notebook_harness.RIG_STANDINS).
+NO_MICROPHONE = "no microphone in the notebook test"
 
 # The notebook keeps INFO out of its cells (root at WARNING). This leaves the
 # cells as they are and sends the workshop's INFO, and every warning, to a file.
@@ -280,6 +284,16 @@ class NotebookKernel:
         line = next(t for t in reversed(text.splitlines()) if t.startswith("NS "))
         namespace = json.loads(line[3:])
         self.twin_log = namespace.get("twin_log") or self.twin_log
+        # The kernel hears nothing of the room and asks a Gemma of its own. With the real
+        # microphone and the configured port it took a sentence spoken to a notebook open on
+        # the same machine for its own command, and stopped the llama-server that notebook
+        # was using when it closed (2026-11-25).
+        assert namespace["microphone"] == NO_MICROPHONE, (
+            f"the notebook kernel opened a microphone: {namespace['microphone']!r}")
+        from vla_pipeline.utils.config import load_config
+
+        assert namespace["gemma_port"] != load_config()["gemma4-e4b-it"]["port"], (
+            "the notebook kernel asks Gemma on the configured port, which a notebook open on this machine uses")
         return namespace
 
     def failure_report(self, dest: Path, since: float | None) -> str:

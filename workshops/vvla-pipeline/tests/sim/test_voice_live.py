@@ -197,3 +197,46 @@ def test_spoken_sentences_give_their_commands_one_request_each_the_call_before_t
         assert when < requests[index][0]
     # Gemma wrote down the words of every command.
     assert all(words for kind, _, words in events if kind == "heard"), events
+
+
+# ---- the stop rule, typed, on the real model -----------------------------------------------------
+# "stop robot" is the only stop. The tests that hold this rule elsewhere use the keyword match
+# and a stand-in server; when Gemma's answer became a list, the real model took a bare "stop"
+# for a stop and no test saw it. These ask the real model.
+STOP_ORDERS = ["stop robot", "Please STOP ROBOT now", "robot stop", "stop robot now"]
+NOT_STOP_ORDERS = ["stop", "halt", "freeze", "stop it", "abort", "stop talking"]
+
+
+@pytest.fixture(scope="module")
+def gemma(tmp_path_factory):
+    """The real Gemma on a llama-server of this module's own; a missing piece fails, nothing is skipped."""
+    from vla_pipeline.llm.llama_intent import LlamaIntentParser
+
+    cfg = load_config()
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        cfg["gemma4-e4b-it"]["port"] = sock.getsockname()[1]
+    cfg.setdefault("system", {})["log_dir"] = str(tmp_path_factory.mktemp("gemma-typed"))
+    parser = LlamaIntentParser(cfg)  # FileNotFoundError names the missing file and scripts/ensure_voice.sh
+    try:
+        parser.warm_up()
+        yield parser
+    finally:
+        parser.close()
+
+
+def test_a_typed_stop_robot_stops_and_a_bare_stop_does_not(gemma):
+    answers = [(text, Intent.STOP, gemma.parse(text).intent) for text in STOP_ORDERS]
+    answers += [(text, Intent.UNKNOWN, gemma.parse(text).intent) for text in NOT_STOP_ORDERS]
+    print()
+    for text, expected, got in answers:
+        print(f"{text!r:24} -> {got.value:8} should be {expected.value}")
+    wrong = [(text, got.value, expected.value) for text, expected, got in answers if got is not expected]
+    assert not wrong, wrong
+
+
+@pytest.mark.xfail(strict=True, reason='the real Gemma answers a typed "home" alone as home, with every wording '
+                                       'of the home line tried (2026-11-25); the instructions say it is unknown')
+def test_a_typed_home_alone_is_no_command(gemma):
+    assert gemma.parse("go home").intent is Intent.HOME
+    assert gemma.parse("home").intent is Intent.UNKNOWN

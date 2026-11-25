@@ -189,6 +189,15 @@ class CommandRegistry:
 # Few-shot system prompt for the intent LLM. Kept here so the parser and any
 # eval scripts share one source of truth. The grammar (config/intent.gbnf)
 # guarantees the output shape; this prompt steers the choice.
+#
+# The "stop" line says the two words together, and that the word alone is unknown. With the
+# line as it was ('the speaker says "stop robot". "stop", "halt", ... are "unknown"') and the
+# answer as a list, Gemma took a typed "stop", "halt", "freeze", "stop it" and "abort" for a
+# stop. Measured on the real model, 2026-11-25, typed sentences and spoken clips: 258 right
+# of 284 with this line, 241 with the old one; every stop case right. The same rewording of
+# the "home" line, and a rule for single words under "unknown", scored lower (253, 248).
+# A typed "home" alone is still answered "home", as it was before the list answer.
+# tests/sim/test_voice_live.py asks the real model the stop sentences.
 INTENT_SYSTEM_PROMPT = """\
 You are the command router for a robot arm on a crowded floor. Other people
 are talking. Ignore background conversation, a second speaker, questions,
@@ -217,7 +226,8 @@ Commands:
 - "wave": the user wants a wave / greeting ("wave at me", "say hi").
 - "home": the speaker says "go home". "home", "rest", and "reset" alone
   are "unknown".
-- "stop": the speaker says "stop robot". "stop", "halt", "freeze",
-  "stop it", "abort", and "stop talking" are "unknown".
+- "stop": the speaker says the two words "stop robot" together ("stop
+  robot", "robot stop", "stop robot now"). The word "stop" alone is "unknown",
+  and so are "halt", "freeze", "stop it", "abort", and "stop talking".
 - "unknown": anything else.
 """

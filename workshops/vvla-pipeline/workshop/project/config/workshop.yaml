@@ -120,7 +120,7 @@ sim:                                # MuJoCo digital twin (app.py --digital-twin
     mount: {camera: mount_cam, width: 640, height: 480, fps: 30}
     view: {camera: free, width: 800, height: 800, fps: 30, lookat: [0.17, 0.0, 0.18], distance: 0.9}
 
-intent_node:                        # the Llama intent node (component 2)
+intent_node:                        # the Gemma intent node (component 2)
   transcript_topic: /vla/transcript # std_msgs/String in (what was said)
   intent_topic: /vla/intent         # std_msgs/String out (JSON {"command","object"})
 

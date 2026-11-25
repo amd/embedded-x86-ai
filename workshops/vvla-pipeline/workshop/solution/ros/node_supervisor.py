@@ -10,7 +10,7 @@
 The architecture rule is *"server nodes own hardware; everything else
 subscribes."* On the rig that means one process per device: the SO-101 arm
 bus (with its ros2_control controllers, ``launch/so101_control.launch.py``),
-each camera, and (optionally) the Llama intent brain. Rather than make you
+each camera, and (optionally) the Gemma intent brain. Rather than make you
 open a terminal per node, the live app (and the workshop launcher) start them
 here as child processes, wait until each is actually publishing, and tear them
 all down on exit - SIGINT first so the arm parks at ``REST_POSE``.
@@ -158,7 +158,7 @@ def _node_specs(
         ),
         "intent": _Child(
             key="intent",
-            label="Llama intent node",
+            label="Gemma intent node",
             ready_topic=intent.get("intent_topic", "/vla/intent"),
             argv=["-m", "ros.intent_node", *(["--mock"] if mock else [])],
         ),

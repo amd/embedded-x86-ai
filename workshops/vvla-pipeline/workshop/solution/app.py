@@ -37,7 +37,7 @@ a terminal per node. Pass --no-nodes if you start them yourself.
 
 While the UI runs, type commands into the terminal ("dance", "wave",
 "go home", "copy my movements", "stop") - they run through YOUR
-handle_transcript gauntlet, parsed by Llama on the iGPU (or the keyword
+handle_transcript gauntlet, parsed by Gemma 4 on the iGPU (or the keyword
 stand-in only under --no-llm).
 """
 

@@ -100,7 +100,7 @@ def read_gpu_busy():
     """Overall iGPU busy % from amdgpu ``gpu_busy_percent`` sysfs, or None.
 
     This counts compute (ROCm/HIP) as well as graphics, so it reflects the
-    Llama-on-iGPU load the workshop actually drives. Clamped to 100.
+    load of Gemma 4 on the iGPU that the workshop actually drives. Clamped to 100.
     """
     if not _GPU_BUSY:
         return None
@@ -127,7 +127,7 @@ def read_gpu():
     Prefers the amdgpu ``gpu_busy_percent`` sysfs node, the driver's real
     engine-busy gauge, which includes ROCm/HIP *compute* load. radeontop's
     ``gpu`` counter only watches the graphics/render pipe, so it reads near-idle
-    while the iGPU is busy running Llama - that mismatch is why the HUD used to
+    while the iGPU is busy running Gemma - that mismatch is why the HUD used to
     show a wrong (too-low) GPU %. radeontop is kept as a fallback for machines
     without the sysfs node.
     """

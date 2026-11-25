@@ -11,8 +11,8 @@
 notebooks in ``01_ai_models``, ``02_ros2`` and ``03_integration``. Here each
 notebook runs top to bottom in a fresh ``vvla-workshop`` kernel, with
 :mod:`notebook_harness`'s stand-ins for the rig's hardware and a scripted
-student for its live cells. YOLO must run on the NPU, and the Llama
-notebooks must get Llama's answers from the iGPU.
+student for its live cells. YOLO must run on the NPU, and the Gemma
+notebooks must get Gemma's answers from the iGPU.
 
 ``cd workshop && ./run_notebooks.sh --test`` runs this after the README's setup.
 """

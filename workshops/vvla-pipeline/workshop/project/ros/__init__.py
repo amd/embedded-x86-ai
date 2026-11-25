@@ -9,7 +9,7 @@
 
 Your TODOs live in ``camera_node.py`` / ``camera_client.py`` (frames),
 ``arm_node.py`` / ``arm_client.py`` (joint commands and state), and
-``intent_node.py`` (the Llama intent node). Run the harness with:
+``intent_node.py`` (the Gemma intent node). Run the harness with:
 
     python -m ros.selftest            # over ROS 2 (source /opt/ros/jazzy/setup.bash first)
 """

@@ -27,7 +27,7 @@ What it checks, per component-3 TODO:
 - **3.4 run_dance** - beat-paced choreography that stays stoppable and
   always parks at the rest pose.
 
-The on-hardware equivalent - real camera, NPU pose, ROS 2 arm, Llama brain -
+The on-hardware equivalent - real camera, NPU pose, ROS 2 arm, Gemma brain -
 is the live UI itself:
 
     python app.py --dry-run --synthetic --no-llm     # laptop / CI

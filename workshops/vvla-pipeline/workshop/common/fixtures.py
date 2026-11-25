@@ -252,7 +252,7 @@ def offline_parse_text(text: str) -> dict:
     """Keyword routing → the same ``{"command", "object"}`` dict the LLM emits.
 
     Used by the mock server below and as the app's ``--no-llm`` brain. It is a
-    *stand-in*, not the lesson - the real thing is grammar-constrained Llama.
+    *stand-in*, not the lesson - the real thing is grammar-constrained Gemma 4.
     """
     low = (text or "").lower()
     for pattern, command, obj_mode in _KEYWORD_ROUTES:

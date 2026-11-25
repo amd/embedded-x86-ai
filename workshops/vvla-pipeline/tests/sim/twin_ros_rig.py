@@ -360,7 +360,7 @@ def quat_close(a, b, tol: float = 1e-3) -> bool:
 
 
 def keyword_parse(text: str):
-    """The notebook's keyword stand-in for Llama."""
+    """The notebook's keyword stand-in for Gemma."""
     from common.fixtures import offline_parse_text
     from common.intents import Intent, ParsedCommand
 

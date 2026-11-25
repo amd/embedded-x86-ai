@@ -616,7 +616,7 @@ def test_console_run_and_advance(observers, kernel):
 
 def test_console_stop(observers, kernel):
     """The red stop button ends the console cell: the in-flight pickup is not a grasp
-    and the arm parks. Saying "stop" only halts the behavior. The module teardown closes the twin."""
+    and the arm parks. Saying "stop robot" only halts the behavior. The module teardown closes the twin."""
     from common.motion import REST_POSE
 
     probe, _scene = observers

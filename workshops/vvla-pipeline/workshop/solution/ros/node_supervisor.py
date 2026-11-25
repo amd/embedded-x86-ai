@@ -104,9 +104,8 @@ def _node_specs(
     The arm (or twin) runs on the hardware side's topics, and its controllers
     (``launch/so101_control.launch.py``) start right after it.
     """
-    import shutil
-
     from so101_sim.control import HARDWARE_COMMANDS, HARDWARE_STATES, LAUNCH_FILE
+    from so101_sim.ros_launch import python_args
 
     cams = cfg.get("cameras") or {}
     robot = cfg.get("robot") or {}
@@ -128,7 +127,7 @@ def _node_specs(
             key="controllers",
             label="SO-101 controllers (ros2_control)",
             ready_topic="/joint_states",
-            argv=[shutil.which("ros2") or "ros2", "launch", str(LAUNCH_FILE), f"config:={cfg_file}", "stack:=workshop"],
+            argv=python_args(LAUNCH_FILE, f"config:={cfg_file}", "stack:=workshop"),
         ),
         "camera_mount": _Child(
             key="camera_mount",

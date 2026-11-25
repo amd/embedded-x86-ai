@@ -16,7 +16,6 @@ real ``strix_vla.launch.py`` runs unchanged.
 from __future__ import annotations
 
 import os
-import re
 import shlex
 import signal
 import subprocess
@@ -158,34 +157,22 @@ def test_the_pipeline_launch_is_not_started_with_sigint_ignored():
     assert proc.returncode == 0, proc.stderr or proc.stdout
 
 
-def _spawners_finished(text: str, first: str) -> bool:
-    """Both spawners have logged a clean exit. ``first`` printed the arm controller
-    coming up; its name is on that line. A clean exit already in the log counts."""
-    names = set(re.findall(r"\[(spawner-\d+)", text))
-    clean = set(re.findall(r"\[(spawner-\d+)\]: process has finished cleanly", text))
-    return first in clean and len(names) >= 2 and names <= clean
-
-
 def test_an_arm_launch_brings_up_the_controllers_on_the_arm_server(tmp_path):
     """The controllers start before the arm server. Their hardware side waits for the
     server's first joint state, so the arm controller still comes up active.
 
-    The line that names the arm controller is the first spawner's middle step.
-    Ctrl-C waits until both spawners have exited on their own."""
+    ``so101_sim.controller_bringup`` says so in one line when every controller is in its
+    state, then exits on its own. Ctrl-C comes after that exit."""
     log = tmp_path / "arm.log"
     marker = f"{os.getpid()}-{tmp_path.name}"
     arm = _launch(arm=True, cameras=False, log_path=log, marker=marker)
     try:
         # The stack's own bring-up budget: the server's first state, then the controllers.
         arm.expect(
-            r"\[(spawner-\d+)\][^\n]*Configured and activated arm_controller",
+            r"\[controller_bringup-\d+\][^\n]*controllers up:[^\n]*arm_controller active",
             timeout=BRING_UP_S,
         )
-        first = arm.match.group(1)
-        arm.logfile_read.flush()
-        while not _spawners_finished(log.read_text(), first):
-            arm.expect(r"\[spawner-\d+\]: process has finished cleanly", timeout=BRING_UP_S)
-            arm.logfile_read.flush()
+        arm.expect(r"\[controller_bringup-\d+\]: process has finished cleanly", timeout=BRING_UP_S)
         _stop(arm)
         arm.logfile_read.flush()
         text = log.read_text()

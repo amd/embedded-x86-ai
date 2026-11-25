@@ -23,6 +23,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from so101_sim.parent_death import STOP_S
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LAUNCH_FILE = REPO_ROOT / "launch" / "so101_control.launch.py"
 # topic_based_ros2_control, built by bootstrap.sh into the colcon workspace ros_ws/
@@ -46,9 +48,11 @@ SERVER_START_S = 10.0
 # is not republished as a live /joint_states. The arm clients use this same
 # bound for a reply from a controller that has gone.
 JOINT_STATE_STALE_S = 2.0
-# From the server's first state until every controller is loaded: 1.0 s with
-# strix_vla.launch.py on the twin, on an idle host. Five times that covers a
-# host that loads the pipeline's models at the same time.
+# From the server's first state until every controller is loaded: 0.3 s with
+# so101_sim.controller_bringup on the twin, on an idle host (2026-11-25), which
+# no lost reply lengthens. ROS's spawner took 1.0 s, and 10 s more for every
+# reply that did not arrive. The bound covers a host that loads the pipeline's
+# models at the same time.
 CONTROLLERS_UP_S = 5.0
 # How long a client started with the stack waits for it to come up.
 BRING_UP_S = SERVER_START_S + CONTROLLERS_UP_S
@@ -92,20 +96,17 @@ def child_domain_env(base: dict | None = None) -> dict:
 def start_controllers(config_path, stack: str, gripper: str = "forward", log=None) -> subprocess.Popen:
     """``launch/so101_control.launch.py`` with this Python, in a process group of
     its own, shut down (SIGINT) when this process exits however it exits."""
-    import shutil
+    from so101_sim.ros_launch import python_args
 
-    ros2 = shutil.which("ros2")
-    if ros2 is None:
-        raise RuntimeError("ros2 is not on PATH: source /opt/ros/jazzy/setup.bash first")
+    launch = python_args(LAUNCH_FILE, f"config:={config_path}", f"stack:={stack}", f"gripper:={gripper}")
     return subprocess.Popen(
-        [sys.executable, "-m", "so101_sim.parent_death", sys.executable, ros2, "launch", str(LAUNCH_FILE),
-         f"config:={config_path}", f"stack:={stack}", f"gripper:={gripper}"],
+        [sys.executable, "-m", "so101_sim.parent_death", sys.executable, *launch],
         cwd=str(REPO_ROOT), stdout=log, stderr=subprocess.STDOUT if log is not None else None,
         start_new_session=True, env=child_domain_env(),
     )
 
 
-def stop_controllers(proc: subprocess.Popen, budget_s: float = 10.0) -> None:
+def stop_controllers(proc: subprocess.Popen, budget_s: float = STOP_S) -> None:
     """SIGINT the launch's process group; kill it when it has not exited within ``budget_s``."""
     if proc.poll() is None:
         os.killpg(proc.pid, signal.SIGINT)

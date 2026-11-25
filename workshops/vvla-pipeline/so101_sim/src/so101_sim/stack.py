@@ -8,7 +8,8 @@
 """The ROS graph ``run_pipeline.sh`` starts. The notebook starts this same launch.
 
 ``python -m so101_sim.stack`` resets the ignored SIGINT a background shell job
-inherits, then replaces itself with ``ros2 launch launch/strix_vla.launch.py``.
+inherits, then replaces itself with ``ros2 launch launch/strix_vla.launch.py``,
+started through :mod:`so101_sim.ros_launch`.
 """
 
 from __future__ import annotations
@@ -16,10 +17,11 @@ from __future__ import annotations
 import argparse
 import ctypes
 import os
-import shutil
 import signal
 import sys
 from pathlib import Path
+
+from so101_sim.ros_launch import python_args
 
 REPO = Path(__file__).resolve().parents[3]
 LAUNCH = REPO / "launch" / "strix_vla.launch.py"
@@ -44,20 +46,16 @@ def launch_argv(
     dry_run: bool,
     config: str | None = None,
 ) -> list[str]:
-    """The ``ros2 launch`` command."""
-    ros2 = shutil.which("ros2")
-    if ros2 is None:
-        raise RuntimeError("ros2 is not on PATH: source /opt/ros/jazzy/setup.bash first")
-    argv = [
-        sys.executable, ros2, "launch", str(LAUNCH),
+    """The launch's command: ``ros2 launch``, through :mod:`so101_sim.ros_launch`."""
+    arguments = [
         f"arm:={str(arm).lower()}",
         f"cameras:={str(cameras).lower()}",
         f"digital_twin:={str(digital_twin).lower()}",
         f"dry_run:={str(dry_run).lower()}",
     ]
     if config:
-        argv.append(f"config:={config}")
-    return argv
+        arguments.append(f"config:={config}")
+    return [sys.executable, *python_args(LAUNCH, *arguments)]
 
 
 def accept_stop_signals() -> None:

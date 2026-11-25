@@ -23,8 +23,10 @@ and ``REPORT`` last. The rig's hardware is replaced, nothing else:
   ``/cameras/mount/image_raw`` or ``/dev/video0``. Pose comes from
   ``common.fixtures.ScriptedPose`` (the real pose session still opens),
 * the microphone: none. ``sounddevice.RawInputStream`` fails as on a machine
-  without one, so the console falls back to typing. Gemma stays real, on a
-  llama-server of the kernel's own, on a free port.
+  without one, so the console falls back to typing. A test that speaks to the
+  notebook gives its kernel a :class:`SpokenInput` instead: the microphone then
+  plays, in real time, the synthetic voice the test writes. Gemma stays real, on
+  a llama-server of the kernel's own, on a free port.
 
 ``RIG_STANDINS`` also records every ONNX Runtime session the kernel makes,
 with the provider it got, so a test can check where YOLO ran, and turns on
@@ -43,8 +45,11 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from synthetic_voice import OFFSET, RATE, microphone_bytes, spoken
+
 logger = logging.getLogger(__name__)
 
+MIC_ENV = "VVLA_NOTEBOOK_MIC"  # set for a kernel a test speaks to: the path of its SpokenInput
 PIPE_ROOT = Path(__file__).resolve().parents[2]
 NOTEBOOKS = PIPE_ROOT / "workshop" / "notebooks"
 KERNEL = "vvla-workshop"
@@ -185,16 +190,53 @@ class _PhotoCamera:
 _cv2.VideoCapture = _PhotoCamera
 
 
+import os as _os
+
 import sounddevice as _sounddevice
+
+# The speech front end opens its microphone through sounddevice.RawInputStream
+# (vla_pipeline/llm/voice.py). The kernel never hears the room it runs in: it has no
+# microphone, or one that plays the sound a test wrote for it.
+_MIC_SOUND = _os.environ.get("@@MIC_ENV@@")  # the file a test appends the microphone's sound to
 
 
 def _no_microphone(*args, **kwargs):
-    """The speech front end opens its microphone here (vla_pipeline/llm/voice.py). It fails as
-    on a machine without one, so the kernel never hears the room it runs in."""
+    """Opening the microphone fails as on a machine without one."""
     raise _sounddevice.PortAudioError("no microphone in the notebook test")
 
 
-_sounddevice.RawInputStream = _no_microphone
+class _FileMicrophone:
+    """The sound a test appends to _MIC_SOUND (16-bit, one channel), a block every block's worth
+    of real time as a device delivers it; a quiet microphone's constant offset while the file
+    holds nothing new. Sound written before the stream opened is not heard."""
+
+    def __init__(self, samplerate, **settings):
+        self._rate = samplerate
+        self._position = 0
+        self._file = open(_MIC_SOUND, "rb")
+        self._file.seek(0, _os.SEEK_END)
+
+    def __enter__(self):
+        self._began = _time.monotonic()
+        return self
+
+    def __exit__(self, *_):
+        self._file.close()
+        return False
+
+    def read(self, samples):
+        self._position += samples
+        rest = self._began + self._position / self._rate - _time.monotonic()
+        if rest > 0:
+            _time.sleep(rest)  # the device's own clock
+        sound = self._file.read(samples * 2)
+        if len(sound) % 2:  # a write caught half-way: its odd byte belongs to the next block
+            self._file.seek(-1, _os.SEEK_CUR)
+            sound = sound[:-1]
+        return sound + _np.full(samples - len(sound) // 2, @@MIC_OFFSET@@, "<i2").tobytes(), False
+
+
+_sounddevice.RawInputStream = _FileMicrophone if _MIC_SOUND else _no_microphone
 
 import common.twin_voice as _twin_voice
 
@@ -204,6 +246,33 @@ _twin_voice.REPORT_RECORDS = True  # the test reads each command's record from t
 # The kernel runs this function's own source. It cannot import it: the venv has
 # a regular package named ``tests`` in site-packages that hides this directory.
 RIG_STANDINS = RIG_STANDINS.replace("@@APPLY_NOTEBOOK_STANDINS@@\n", inspect.getsource(apply_notebook_standins))
+RIG_STANDINS = RIG_STANDINS.replace("@@MIC_ENV@@", MIC_ENV).replace("@@MIC_OFFSET@@", str(OFFSET))
+
+
+class SpokenInput:
+    """What a test says to a notebook kernel: the file its stand-in microphone plays.
+
+    Pass :meth:`env` to the kernel. Each :meth:`say` appends one sentence of the synthetic
+    voice and ``QUIET_AFTER_S`` of quiet, so two sentences said one after the other are two
+    utterances. The kernel plays the file in real time.
+    """
+
+    QUIET_AFTER_S = 1.0
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.path.write_bytes(b"")
+
+    def env(self) -> dict:
+        return {MIC_ENV: str(self.path)}
+
+    def say(self, text: str) -> None:
+        """Append ``text``, spoken. Runs espeak-ng: call it off the event loop."""
+        import numpy as np
+
+        sound = microphone_bytes(np.concatenate([spoken(text), np.zeros(int(self.QUIET_AFTER_S * RATE))]))
+        with open(self.path, "ab") as out:
+            out.write(sound)
 
 REPORT = '''\
 import json as _json
@@ -351,6 +420,22 @@ class Watcher:
         with self._lock:
             found = [r for r in self.records[_records_at(since):] if r["text"] == text]
             return found[-1] if found else None
+
+    def spoken_record(self, command: str, since: "Mark | int" = 0) -> dict | None:
+        """The latest record after ``since`` of a spoken ``command``.
+
+        A spoken command reaches the console as the JSON the speech front end delivers
+        (command, object, words heard), and that JSON is its record's text.
+        """
+        with self._lock:
+            for record in reversed(self.records[_records_at(since):]):
+                try:
+                    delivered = json.loads(record["text"])
+                except ValueError:
+                    continue  # a typed command's record
+                if isinstance(delivered, dict) and delivered.get("command") == command:
+                    return {**record, "delivered": delivered}
+            return None
 
     def close(self) -> None:
         self._wake_tx.send(b"")  # the pump returns on it

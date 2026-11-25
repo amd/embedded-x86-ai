@@ -52,6 +52,7 @@ from notebook_harness import (
     NOTEBOOKS,
     PIPE_ROOT,
     Console,
+    SpokenInput,
     Watcher,
     cell_index,
     cell_stdout,
@@ -98,6 +99,9 @@ print("NS " + _json.dumps({
 '''
 # What the kernel's speech front end reports for its microphone (notebook_harness.RIG_STANDINS).
 NO_MICROPHONE = "no microphone in the notebook test"
+# With a microphone, the notebook's voice.listen() prints this and waits for one spoken command.
+LISTEN_ASKS = "Say a command"
+LISTEN_SENTENCE = "pick up the ball"
 
 # The notebook keeps INFO out of its cells (root at WARNING). This leaves the
 # cells as they are and sends the workshop's INFO, and every warning, to a file.
@@ -154,7 +158,8 @@ class NotebookKernel:
     lives on one thread and every scenario is submitted onto it.
     """
 
-    def __init__(self):
+    def __init__(self, spoken: SpokenInput | None = None):
+        self.spoken = spoken  # what a test says to this kernel; None: the kernel has no microphone
         self.watcher: Watcher | None = None
         self.needs_new_kernel = False
         self.last_pid: int | None = None
@@ -229,10 +234,18 @@ class NotebookKernel:
         self._serve_task = asyncio.current_task()
         self._down.clear()
         try:
-            async with self.client.async_setup_kernel(env=kernel_env()):
+            env = kernel_env() | (self.spoken.env() if self.spoken else {})
+            async with self.client.async_setup_kernel(env=env):
                 self.watcher = Watcher(self.client.km.get_connection_info())
                 try:
-                    await self._through("c0000014")
+                    # With a microphone, cell c0000014 asks for one spoken command and waits for it.
+                    asked = asyncio.create_task(self._answer_listen()) if self.spoken else None
+                    try:
+                        await self._through("c0000014")
+                    finally:
+                        if asked is not None:
+                            asked.cancel()  # no effect once it has spoken
+                            await asyncio.gather(asked, return_exceptions=True)
                     await self._log_to_file()
                     self._open.set()
                     self._opened.set()
@@ -243,6 +256,12 @@ class NotebookKernel:
                         self.watcher = None
         finally:
             self._down.set()
+
+    async def _answer_listen(self) -> None:
+        """Say one command when the notebook's ``voice.listen()`` asks for it."""
+        await until(lambda: self.watcher.said(LISTEN_ASKS), "the notebook asking for a spoken command",
+                    self.watcher)
+        await asyncio.to_thread(self.spoken.say, LISTEN_SENTENCE)
 
     async def _restart(self) -> None:
         """SIGINT during mimic wedges the NPU session, and the rerun test closes the stack.
@@ -287,9 +306,11 @@ class NotebookKernel:
         # The kernel hears nothing of the room and asks a Gemma of its own. With the real
         # microphone and the configured port it took a sentence spoken to a notebook open on
         # the same machine for its own command, and stopped the llama-server that notebook
-        # was using when it closed (2026-11-25).
-        assert namespace["microphone"] == NO_MICROPHONE, (
-            f"the notebook kernel opened a microphone: {namespace['microphone']!r}")
+        # was using when it closed (2026-11-25). A kernel a test speaks to has the stand-in
+        # microphone, which opens without an error.
+        expected = None if self.spoken else NO_MICROPHONE
+        assert namespace["microphone"] == expected, (
+            f"the notebook kernel's microphone reports {namespace['microphone']!r}, not {expected!r}")
         from vla_pipeline.utils.config import load_config
 
         assert namespace["gemma_port"] != load_config()["gemma4-e4b-it"]["port"], (
@@ -443,12 +464,18 @@ def observers(workshop_cfg):
 
 @pytest.fixture(scope="module")
 def kernel(observers):
+    yield from notebook_kernel()
+
+
+def notebook_kernel(spoken: SpokenInput | None = None):
+    """A fixture's body: the pipeline's twin launches and one notebook kernel on them, run
+    through cell c0000014; closed and checked afterwards. ``spoken``: what a test says to it."""
     from twin_ros_rig import start_pipeline_launches, stop_pipeline_launches
 
     assert_domain_free("a twin already runs on the test domain")
     log = tempfile.NamedTemporaryFile(prefix="notebook_stack_", suffix=".log", delete=False)
     launches = start_pipeline_launches(log)
-    session = NotebookKernel()
+    session = NotebookKernel(spoken)
     try:
         session.start()
         try:

@@ -28,26 +28,18 @@ from __future__ import annotations
 
 import json
 import socket
-import struct
-import subprocess
-import sys
 import threading
 import time
-from pathlib import Path
 
 import numpy as np
 import pytest
-from scipy.signal import resample_poly
 
+from synthetic_voice import OFFSET, RATE, microphone_bytes, spoken
 from vla_pipeline.llm.intents import Intent
 from vla_pipeline.utils.config import load_config
 
 pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.slow, pytest.mark.timeout(180)]
 
-ESPEAK_ONCE = Path(__file__).with_name("espeak_once.py")
-RATE = 16000
-OFFSET = 1028       # the constant a quiet built-in microphone was measured to add to its samples
-SPEECH_PEAK = 0.1   # of full scale: quiet speech
 LEAD_S = 1.5        # silence before the first sentence
 GAP_S = 2.5         # silence after each sentence: room for Gemma's answer
 # (sentence, the command it must give, its object). The last is a question: no command.
@@ -61,23 +53,6 @@ SENTENCES = [
 ]
 
 
-def spoken(text: str) -> np.ndarray:
-    """The sentence in espeak-ng's voice at 16 kHz, trimmed, at SPEECH_PEAK. A process per sentence:
-    espeak-ng keeps state between sentences, and the same sentence must be the same sound every time."""
-    ran = subprocess.run(
-        [sys.executable, str(ESPEAK_ONCE), "libespeak-ng.so.1", "en-us", "150", text],
-        capture_output=True, timeout=60,
-    )
-    assert ran.returncode == 0 and len(ran.stdout) > 4, (
-        "espeak-ng gave no sound (sudo apt install libespeak-ng1): " + ran.stderr.decode("utf-8", "replace")
-    )
-    rate = struct.unpack("<I", ran.stdout[:4])[0]
-    sound = np.frombuffer(ran.stdout[4:], "<i2").astype(np.float64)
-    loud = np.flatnonzero(np.abs(sound) > 0.01 * np.abs(sound).max())
-    sound = resample_poly(sound[loud[0]:loud[-1] + 1], RATE, rate)
-    return sound * (SPEECH_PEAK * 32767 / np.abs(sound).max())
-
-
 def test_spoken_sentences_give_their_commands_one_request_each_the_call_before_the_words(monkeypatch, tmp_path):
     parts, begins, ends = [np.zeros(int(LEAD_S * RATE))], [], []
     for sentence, _, _ in SENTENCES:
@@ -85,7 +60,7 @@ def test_spoken_sentences_give_their_commands_one_request_each_the_call_before_t
         parts.append(spoken(sentence))
         ends.append(sum(len(part) for part in parts) / RATE)
         parts.append(np.zeros(int(GAP_S * RATE)))
-    sound = np.round(np.concatenate(parts) + OFFSET).astype("<i2").tobytes()
+    sound = microphone_bytes(np.concatenate(parts))
     played_s = len(sound) / 2 / RATE
     answered = threading.Event()  # set when the parser has answered one request per sentence
 

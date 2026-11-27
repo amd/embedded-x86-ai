@@ -395,7 +395,7 @@ def check_intent(rep: Reporter, cfg: dict) -> None:
             """Verify a stop transcript publishes immediately without reaching the parser."""
             before = len(calls)
             n_intents = len(received)
-            pub.publish(String(data="whoa STOP right now!"))
+            pub.publish(String(data="stop robot"))
             got = _wait_for(lambda: len(received) > n_intents, 3.0)
             assert got, "no intent published for a stop transcript"
             assert (

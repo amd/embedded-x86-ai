@@ -10,24 +10,29 @@
 from __future__ import annotations
 
 
-def test_sizer_skips_whisper_when_it_is_on_cpu(tmp_path):
-    """Whisper is first in the list. device cpu leaves the sizer on YOLO-pose."""
+def _cfg(tmp_path, pose_device: str, detect_device: str):
+    pose = tmp_path / "yolo26s-pose.onnx"
+    detect = tmp_path / "yolo26s-detect.onnx"
+    pose.write_bytes(b"onnx")
+    detect.write_bytes(b"onnx")
+    cfg = {
+        "yolo_pose": {"device": pose_device, "onnx": str(pose), "cache_key": "yolo26s_pose_fp32"},
+        "yolo_detect": {"device": detect_device, "onnx": str(detect), "cache_key": "yolo26s_detect_fp32"},
+    }
+    return cfg, pose, detect
+
+
+def test_sizer_is_yolo_pose_when_both_models_are_on_the_npu(tmp_path):
+    """YOLO-pose is first in the list, so it opens first and holds the NPU buffers."""
     from vla_pipeline.utils.npu_session import sizer_onnx
 
-    whisper = tmp_path / "encoder.onnx"
-    pose = tmp_path / "yolo26s-pose.onnx"
-    whisper.write_bytes(b"onnx")
-    pose.write_bytes(b"onnx")
-    cfg = {
-        "whisper": {
-            "device": "cpu",
-            "encoder_onnx": str(whisper),
-            "cache_key_encoder": "whisper_base_encoder",
-        },
-        "yolo_pose": {
-            "device": "npu",
-            "onnx": str(pose),
-            "cache_key": "yolo26s_pose_fp32",
-        },
-    }
+    cfg, pose, _ = _cfg(tmp_path, "npu", "npu")
     assert sizer_onnx(cfg) == pose
+
+
+def test_sizer_is_yolo_detect_when_pose_is_on_the_cpu(tmp_path):
+    """A model whose own device is not npu is skipped; the next one sizes the NPU."""
+    from vla_pipeline.utils.npu_session import sizer_onnx
+
+    cfg, _, detect = _cfg(tmp_path, "cpu", "npu")
+    assert sizer_onnx(cfg) == detect

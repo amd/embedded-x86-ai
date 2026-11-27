@@ -16,10 +16,13 @@
 #                                         #   shown in the twin console window
 #   ./run_pipeline.sh --headless          # no preview windows
 #
-# Starts launch/strix_vla.launch.py in the background - the SO-101 server node
-# (or the digital twin) under ros2_control when robot.use_ros2: true in
-# config/pipeline.yaml, the camera nodes when a camera's use_ros2 is true - then
-# runs the orchestrator. Its arm client waits for the controllers to come up.
+# Starts launch/strix_vla.launch.py in the background, as two independent
+# launches: the camera nodes when a camera's use_ros2 is true, and the SO-101
+# server node (or the digital twin) under ros2_control when robot.use_ros2: true
+# in config/pipeline.yaml. ros2 launch ends everything in a launch when one of
+# its parts raises (a missing xacro, an absent arm), so the cameras never share
+# a launch with the arm. Then it runs the orchestrator. Its arm client waits for
+# the controllers to come up.
 set -eo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
@@ -28,6 +31,28 @@ cd "$REPO_ROOT"
 [[ -f /opt/ros/jazzy/setup.bash ]] && source /opt/ros/jazzy/setup.bash
 
 [[ -f .venv/bin/activate ]] || { echo "No .venv - run ./bootstrap.sh first." >&2; exit 1; }
+
+# build_parser() in vla_pipeline.main is the list of accepted arguments.
+# Check it before any setup: an unknown flag must not start calibration,
+# a model download, or the arm. --help prints and stops here too.
+status=0
+parsed=$(.venv/bin/python - "$@" <<'PY'
+import sys
+from vla_pipeline.main import build_parser
+build_parser(prog="run_pipeline.sh").parse_args(sys.argv[1:])
+print("ARGS_OK")
+PY
+) || status=$?
+if [[ "$status" -ne 0 ]]; then
+  exit "$status"
+fi
+if [[ "$parsed" != *ARGS_OK* ]]; then
+  printf '%s\n' "$parsed"
+  exit 0
+fi
+
+VENV_DIR="${REPO_ROOT}/.venv" "${REPO_ROOT}/scripts/ensure_ros2_control.sh"
+VENV_DIR="${REPO_ROOT}/.venv" "${REPO_ROOT}/scripts/ensure_voice.sh"
 source .venv/bin/activate
 
 # Ryzen AI NPU runtime libs (LD_LIBRARY_PATH for the VitisAI EP).
@@ -40,7 +65,7 @@ export HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION:-11.5.1}"  # gfx1151
 NPU_CONFIGURED="$(python - <<'PY'
 from vla_pipeline.utils.config import load_config
 cfg = load_config()
-sections = ("whisper", "yolo_pose", "yolo_detect")
+sections = ("yolo_pose", "yolo_detect")
 print("yes" if any(str((cfg.get(s) or {}).get("device", "cpu")).lower() == "npu"
                    for s in sections) else "no")
 PY
@@ -64,15 +89,24 @@ PY
 ROBOT_ROS2="${USE_ROS2%% *}"
 CAMERA_ROS2="${USE_ROS2##* }"
 
-LAUNCH_PID=""
+LAUNCH_PIDS=()
 cleanup() {
-  # The launch runs in a session of its own: SIGINT to its process group reaches
-  # every node, so the arm server parks and each node exits. The launch itself,
-  # started as a background job with SIGINT ignored, ends when they have.
-  if [[ -n "$LAUNCH_PID" ]] && kill -0 "$LAUNCH_PID" 2>/dev/null; then
-    kill -INT -- "-$LAUNCH_PID" 2>/dev/null || true
-    wait "$LAUNCH_PID" 2>/dev/null || true
-  fi
+  # Each launch runs in a session of its own. SIGINT to its process group makes
+  # the launch shut its nodes down (and kill any that do not stop), so the arm
+  # server parks and the camera is released. A further Ctrl-C must not cut
+  # this short: the camera driver can be inside a call that SIGINT does not
+  # interrupt, and the launch then escalates to SIGKILL. Both launches get
+  # the signal first, then each is waited for.
+  trap '' INT
+  local pid
+  for pid in "${LAUNCH_PIDS[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -INT -- "-$pid" 2>/dev/null || true
+    fi
+  done
+  for pid in "${LAUNCH_PIDS[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
 }
 trap cleanup EXIT
 
@@ -117,10 +151,20 @@ if [[ "$ROBOT_ROS2" == "true" || "$CAMERA_ROS2" == "true" ]]; then
   [[ -n "$SIM" && -z "$DRY" && "$ROBOT_ROS2" == "true" ]] && TWIN=true
   DRY_ARM=false
   [[ -n "$DRY" ]] && DRY_ARM=true
-  echo "Starting the ROS 2 nodes (arm: $ROBOT_ROS2, cameras: $CAMERA_ROS2, digital twin: $TWIN)..."
-  setsid python "$(command -v ros2)" launch launch/strix_vla.launch.py \
-    arm:="$ROBOT_ROS2" cameras:="$CAMERA_ROS2" digital_twin:="$TWIN" dry_run:="$DRY_ARM" &
-  LAUNCH_PID=$!
+  # start_launch ARM CAMERAS: so101_sim.stack, the same launch the notebook starts.
+  start_launch() {
+    python -m so101_sim.stack --arm "$1" --cameras "$2" \
+      --digital-twin "$TWIN" --dry-run "$DRY_ARM" &
+    LAUNCH_PIDS+=("$!")
+  }
+  if [[ "$CAMERA_ROS2" == "true" ]]; then
+    echo "Starting the camera nodes..."
+    start_launch false true
+  fi
+  if [[ "$ROBOT_ROS2" == "true" ]]; then
+    echo "Starting the arm nodes (digital twin: $TWIN)..."
+    start_launch true false
+  fi
 fi
 
-python -m vla_pipeline.main "$@"
+python -m so101_sim.bringup pipeline "$@"

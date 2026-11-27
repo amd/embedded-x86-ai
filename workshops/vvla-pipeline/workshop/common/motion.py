@@ -1131,8 +1131,11 @@ DANCE_MOVES = {
         },
     ],
     "wrist_spin": [
-        {"shoulder_lift": -55.0, "elbow_flex": 70.0, "wrist_roll": -90.0},
-        {"shoulder_lift": -55.0, "elbow_flex": 70.0, "wrist_roll": 90.0},
+        # A grasp can leave wrist_flex near 90°, past the dance limit. The roll
+        # cannot turn from there, so the elbow stops short and the spin is
+        # reported blocked. Bring the wrist down with the roll.
+        {"shoulder_lift": -55.0, "elbow_flex": 70.0, "wrist_flex": 0.0, "wrist_roll": -90.0},
+        {"shoulder_lift": -55.0, "elbow_flex": 70.0, "wrist_flex": 0.0, "wrist_roll": 90.0},
     ],
     "gripper_chomp": [
         {"gripper": 80.0, "wrist_flex": 30.0},

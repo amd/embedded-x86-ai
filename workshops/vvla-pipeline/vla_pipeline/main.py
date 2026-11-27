@@ -5,15 +5,16 @@
 # Portions of this file consist of AI-generated content. AI-assisted
 # content has been reviewed and validated by the authors.
 
-"""Pipeline orchestrator: microphone → Whisper (CPU by default, optional NPU) → Llama intent (iGPU) →
-behavior dispatch, with an always-hot listener for the safety stop.
+"""Pipeline orchestrator: microphone → Gemma 4 on the iGPU → behavior dispatch,
+with an always-hot listener for the safety stop.
 
 Architecture
 ------------
-- A **listener thread** runs :class:`FastListener` continuously (VAD-based,
-  ~0.35 s end-of-speech) and pushes transcripts onto a queue - the mic stays
-  hot *while behaviors run*, which is what makes a spoken "stop" able to
-  interrupt a running behavior.
+- A **listener thread** cuts the microphone's sound into utterances and sends
+  each to Gemma the moment the speaker falls silent. The command is acted on
+  when Gemma has written it, before the words it heard. The microphone
+  stays hot *while behaviors run*, which is what makes a spoken "stop" able
+  to interrupt a running behavior.
 - ``STOP`` is matched with plain keywords on the raw transcript
   (:data:`STOP_KEYWORDS`) before any LLM round trip, then sets the shared
   stop event that every behavior's ``stop_check`` polls (including mid
@@ -45,6 +46,7 @@ from vla_pipeline.llm.intents import (
     CommandRegistry,
     Intent,
     ParsedCommand,
+    command_from_json,
 )
 from vla_pipeline.utils.config import ensure_dirs, load_config
 
@@ -210,7 +212,11 @@ _STOP_RE = re.compile(r"\b(" + "|".join(STOP_KEYWORDS) + r")\b", re.IGNORECASE)
 
 def is_stop(transcript: str) -> bool:
     """True when the raw transcript contains a stop keyword."""
-    return bool(_STOP_RE.search(transcript or ""))
+    text = transcript or ""
+    if _STOP_RE.search(text):
+        return True
+    cmd = command_from_json(text)
+    return cmd is not None and cmd.intent is Intent.STOP
 
 
 # =============================================================================
@@ -326,8 +332,8 @@ def build_context(cfg: dict, args) -> PipelineContext:
     except Exception as e:
         logger.warning("Arm camera unavailable: %s", e)
 
-    # The arm and camera clients above have already started DDS. A Vitis AI
-    # session opened first leaves LARGE_DATA unable to discover peers.
+    # The DDS participant already exists: so101_sim.bringup created it before
+    # this process reached a Vitis AI session.
     device = args.device
     try:
         from vla_pipeline.vision.yolo_pose_npu import PoseEstimator
@@ -350,12 +356,15 @@ def build_context(cfg: dict, args) -> PipelineContext:
     return ctx
 
 
-def main() -> None:
-    """Parse CLI args, build the pipeline context, and run the listen/dispatch loop until interrupted."""
-    logging.basicConfig(
-        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
+def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
+    """The arguments ``./run_pipeline.sh`` and this module accept.
+
+    ``run_pipeline.sh`` parses with this function before it sets anything up,
+    so an unknown argument stops there instead of starting the arm.
+    """
+    parser = argparse.ArgumentParser(
+        prog=prog, description="Strix VLA pipeline orchestrator"
     )
-    parser = argparse.ArgumentParser(description="Strix VLA pipeline orchestrator")
     parser.add_argument("--config", default=None)
     parser.add_argument(
         "--text-commands",
@@ -381,7 +390,20 @@ def main() -> None:
         action="store_true",
         help="with --digital-twin: skip the twin console window",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    """Parse CLI args, build the pipeline context, and run the listen/dispatch loop until interrupted."""
+    # Ctrl-C must kill this process even during an NPU run. The notebook kernel
+    # keeps the default, which defers that signal until the run returns.
+    from vla_pipeline.utils import npu_session
+
+    npu_session.defer_sigint = False
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
+    )
+    args = build_parser().parse_args()
 
     cfg = load_config(args.config)
     if args.digital_twin:
@@ -396,9 +418,9 @@ def main() -> None:
         console = TwinConsole(ctx, voice="typed" if args.text_commands else "mic")
 
     from vla_pipeline.dispatch import Dispatcher
-    from vla_pipeline.llm.llama_intent import LlamaIntentParser
+    from vla_pipeline.llm.voice import open_voice
 
-    llm = LlamaIntentParser(cfg)
+    llm = open_voice(cfg, device=args.device)
     # Ignore any transcript for a short grace window after launch - the mic goes
     # hot before the user is ready and the first frames are usually room noise
     # that Whisper hallucinates into words. Voice ('stop' included) only starts
@@ -417,25 +439,23 @@ def main() -> None:
     shutdown = threading.Event()
     if console is not None:
         console.attach(dispatcher)
+        # The twin process keeps the last physics state until something resets
+        # it. The notebook's reset button does that before the console is used.
+        if args.digital_twin:
+            console.reset_scene()
 
     # ---------------- listener thread (always hot) ----------------
     if not args.text_commands:
-        from vla_pipeline.audio.vad_listener import FastListener
-        from vla_pipeline.audio.whisper_npu import WhisperNPU
-
-        whisper = WhisperNPU(cfg, device=args.device)
-        listener = FastListener(cfg, whisper.transcribe)
-
-        def _listen() -> None:
-            """Run the always-hot listener loop, forwarding transcripts to :func:`_on_transcript`."""
-            listener.run_forever(
-                on_transcript=lambda t: _on_transcript(t),
-                stop_check=shutdown.is_set,
+        if llm.error:
+            logger.warning("Voice is unavailable (%s). Use --text-commands.", llm.error)
+        else:
+            llm.start(
+                _on_transcript,
                 on_level=console.on_level if console is not None else None,
                 on_busy=console.note_asr if console is not None else None,
+                stop_check=shutdown.is_set,
+                on_heard=dispatcher.heard,
             )
-
-        threading.Thread(target=_listen, daemon=True, name="listener").start()
     else:
 
         def _stdin_loop() -> None:
@@ -455,7 +475,7 @@ def main() -> None:
     # ---------------- dispatch loop (main thread, unless the console owns it) ----------------
     ctx.say(
         "Ready. Try: 'copy my movements', 'pick up the ball', 'wave', "
-        "'dance', 'hold this', 'go home' - or 'stop' at any time. "
+        "'dance', 'hold this', 'go home' - or 'stop robot' at any time. "
         "In the twin window: space stops, r resets the arm and the table."
     )
     try:
@@ -466,7 +486,7 @@ def main() -> None:
                 target=dispatcher.run, args=(shutdown,), daemon=True, name="dispatch"
             )
             worker.start()
-            console.run(shutdown, on_stop=lambda: _on_transcript("stop"))
+            console.run(shutdown, on_stop=lambda: _on_transcript("stop robot"))
             shutdown.set()
             ctx.stop_event.set()
             dispatcher.stop()

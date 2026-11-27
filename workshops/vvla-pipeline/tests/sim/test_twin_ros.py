@@ -7,7 +7,7 @@
 
 """The workshop behaviors on the notebook twin, over ROS 2.
 
-The context is the section 5 console's (``TwinRig``): ``ros.arm_client.Ros2ArmClient``
+The context is the section 4 console's (``TwinRig``): ``ros.arm_client.Ros2ArmClient``
 on the controllers, the arm camera behind ``FanoutCamera``, the YOLO eyes,
 and the keyword parser through ``handle_transcript``. The checks mirror the
 in-process workshop scenarios in ``test_scenarios.py``. Every reading of the twin comes
@@ -31,11 +31,10 @@ from twin_ros_rig import (
     Probe,
     TwinRig,
     assert_domain_free,
-    default_scene_snapshot,
     join_test_domain,
 )
 
-pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.slow, pytest.mark.timeout(300)]
+pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.slow, pytest.mark.timeout(60)]
 pytest.importorskip("rclpy")
 
 
@@ -53,7 +52,7 @@ def rig(workshop_cfg, eyes, probe):
     if detector is None:
         pytest.skip("--sim-eyes seg reads the in-process twin's segmentation; this twin is over ROS")
     assert_domain_free("a twin already runs on the test domain")
-    r = TwinRig(workshop_cfg, detector, scene=default_scene_snapshot(workshop_cfg))
+    r = TwinRig(workshop_cfg, detector)
     yield r
     r.close()
     assert_domain_free("the twin node outlived its test", wait=True)
@@ -61,7 +60,7 @@ def rig(workshop_cfg, eyes, probe):
 
 def _settled_scene(rig) -> dict:
     """The first scene stamped now or later with every prop at rest."""
-    return rig.twin.scene.latest(after=time.time(), settled=True, timeout=None)
+    return rig.twin.scene.latest(after=time.time(), settled=True)
 
 
 def _hold_problem(scene) -> str | None:
@@ -121,7 +120,7 @@ def grip_log():
 def test_twin_pickup(rig, grip_log, record_property, text, body, spoken):
     """Held out in front, and held with a torque limit that cannot trip the
     gripper's overload protection (the in-process tests watch the hold itself)."""
-    start = rig.twin.scene.latest(timeout=None)
+    start = rig.twin.scene.latest()
     z0 = start["bodies"][body]["xyz"][2]
 
     rig.run(text)

@@ -25,7 +25,8 @@
 #      (--system-site-packages so the ROS 2 Jazzy python stack stays importable)
 #   3. Installs Python deps into the venv:
 #        - PyTorch ROCm wheels for the DETECTED arch (AMD repo)
-#        - LeRobot [feetech] from source, MediaPipe, Whisper deps, etc.
+#        - LeRobot v0.6.0 from source, without its dependency set, plus the
+#          Feetech arm packages. MediaPipe, Whisper deps, etc.
 #        - Ryzen AI onnxruntime (VitisAI EP) from $RYZEN_AI_WHEELS - installed
 #          LAST (section 4c) so nothing clobbers it; ROCm is never used for
 #          onnxruntime (llama.cpp + torch only)
@@ -33,9 +34,9 @@
 #      4e. Builds topic_based_ros2_control (the ros2_control hardware side that
 #          talks to the arm servers over topics) into the colcon workspace ros_ws/
 #   5. Downloads the models:
-#        - Whisper-base ONNX encoder/decoder
-#        - Whisper tokenizer + feature extractor (openai/whisper-base.en)
-#        - Llama-3.2-3B-Instruct GGUF Q4_K_M        (hf download)
+#        - Gemma 4 E4B-IT GGUF + audio projector, and Silero VAD v6.2.3
+#          (scripts/ensure_voice.sh; the launchers run it too, so a machine
+#          that only pulls gets them)
 #      YOLO ONNX export is manual (Ultralytics is AGPL-3.0). See the README:
 #        python scripts/export_yolo26s_pose.py
 #        python scripts/export_yolo26s_detect.py
@@ -70,9 +71,6 @@ UBUNTU_CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-noble}")"
 TORCH_SPEC='torch==2.11.0+rocm7.13.0'
 TORCHVISION_SPEC='torchvision==0.26.0+rocm7.13.0'
 TORCHAUDIO_SPEC='torchaudio==2.11.0+rocm7.13.0'
-LLAMA_GGUF_REPO="bartowski/Llama-3.2-3B-Instruct-GGUF"
-LLAMA_GGUF_FILE="Llama-3.2-3B-Instruct-Q4_K_M.gguf"
-LLAMA_OUT_DIR="${MODELS_DIR}/llama-3.2-3b"
 # Not packaged for Jazzy, so section 4e builds it from this tag (BSD-3), with
 # the patches in patches/topic_based_ros2_control/.
 TOPIC_BRIDGE_REPO="https://github.com/PickNikRobotics/topic_based_ros2_control.git"
@@ -385,9 +383,17 @@ if [[ ! -f /opt/ros/jazzy/setup.bash ]]; then
       || die "ROS 2 Jazzy install failed - check packages.ros.org availability for ${UBUNTU_CODENAME}."
   fi
 fi
+# ros-jazzy-desktop does not install these. The digital twin imports xacro,
+# and the arm client imports control_msgs. Install them even when Jazzy was
+# already present, which is a machine bootstrapped at or before cbda9.
+# scripts/ensure_ros2_control.sh installs this same set for a launcher that
+# did not re-run bootstrap, then writes the venv .pth and builds the plugin.
 if [[ "$SKIP_APT" -eq 0 && -f /opt/ros/jazzy/setup.bash ]]; then
   log "Installing ros2_control, the controllers, xacro and the ROS build tools (sudo)"
-  sudo apt install -y ros-jazzy-ros2-control ros-jazzy-ros2-controllers ros-jazzy-xacro ros-dev-tools \
+  sudo apt install -y \
+    ros-jazzy-ros2-control ros-jazzy-ros2-controllers \
+    ros-jazzy-control-msgs ros-jazzy-controller-manager-msgs \
+    ros-jazzy-xacro ros-dev-tools \
     || die "ros2_control install failed - check packages.ros.org availability for ${UBUNTU_CODENAME}."
 fi
 
@@ -401,10 +407,10 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 log "Creating uv venv at ${VENV_DIR}"
-# Pin to the SYSTEM Python 3.12 (Ubuntu 24.04 default). Two reasons:
-#   - lerobot 0.5.2 requires Python >= 3.12 (uv's managed 3.11 fails resolution)
-#   - --system-site-packages only exposes ROS 2 Jazzy's rclpy if the venv
-#     interpreter is ABI-identical to the system python it was built against.
+# Pin to the SYSTEM Python 3.12 (Ubuntu 24.04 default). ROS 2 Jazzy's
+# packages are built for it, and uv's managed 3.11 fails resolution.
+# --system-site-packages exposes /usr/lib, not /opt/ros. Jazzy's Python
+# packages (rclpy, control_msgs) are added by ros_jazzy.pth below.
 SYS_PY="$(command -v /usr/bin/python3.12 || command -v python3.12 || true)"
 if [[ -z "$SYS_PY" ]]; then
   die "python3.12 not found - install it first (apt install python3.12 python3.12-dev) or check your Ubuntu 24.04 setup."
@@ -427,6 +433,8 @@ if [[ ! -x "${VENV_DIR}/bin/pip" ]]; then
 fi
 # Keep colcon (if this repo lands in a ROS workspace) out of the venv.
 touch "${VENV_DIR}/COLCON_IGNORE" "${VENV_DIR}/AMENT_IGNORE"
+# Packages, linker path, venv .pth, and the topic_based_ros2_control plugin.
+SKIP_APT="$SKIP_APT" VENV_DIR="$VENV_DIR" "${REPO_ROOT}/scripts/ensure_ros2_control.sh"
 # shellcheck disable=SC1091
 source "${VENV_DIR}/bin/activate"
 
@@ -458,12 +466,34 @@ write_torch_constraints "$TORCH_CONSTRAINT"
 log "Installing Python dependencies into the venv"
 uv pip install -c "$TORCH_CONSTRAINT" -r "${REPO_ROOT}/requirements.txt"
 
-log "Installing LeRobot (feetech extras) from source"
+# shellcheck disable=SC1091
+source "${REPO_ROOT}/scripts/dep_pins.sh"
+LEROBOT_REV="$(lerobot_rev)"
+log "Installing LeRobot ${LEROBOT_REV} from source, without its dependency set"
 mkdir -p "$THIRD_PARTY"
-if [[ ! -d "${THIRD_PARTY}/lerobot/.git" ]]; then
-  git clone https://github.com/huggingface/lerobot.git "${THIRD_PARTY}/lerobot"
+LEROBOT_DIR="${THIRD_PARTY}/lerobot"
+if [[ ! -d "${LEROBOT_DIR}/.git" ]]; then
+  git clone --branch "$LEROBOT_REV" --depth 1 \
+    https://github.com/huggingface/lerobot.git "$LEROBOT_DIR"
 fi
-uv pip install -c "$TORCH_CONSTRAINT" -e "${THIRD_PARTY}/lerobot[feetech]"
+# A clone on any other release is moved to this tag. The tag is installed
+# with --no-deps: its declared numpy and huggingface-hub ranges contradict
+# requirements.txt, and those pins stay as requirements.txt wrote them.
+# Fetch only when the tag is not already local, so an offline re-run
+# of an already-pinned tree still works.
+if ! git -C "$LEROBOT_DIR" rev-parse -q --verify "refs/tags/${LEROBOT_REV}" >/dev/null; then
+  git -C "$LEROBOT_DIR" fetch --depth 1 origin tag "$LEROBOT_REV" \
+    || die "Could not fetch LeRobot ${LEROBOT_REV}."
+fi
+git -C "$LEROBOT_DIR" checkout --detach "$LEROBOT_REV" \
+  || die "Could not check out LeRobot ${LEROBOT_REV}. Leave ${LEROBOT_DIR} clean and run bootstrap again."
+uv pip install -c "$TORCH_CONSTRAINT" -c "${REPO_ROOT}/requirements.txt" \
+  --no-deps -e "${LEROBOT_DIR}" \
+  || die "Could not install LeRobot ${LEROBOT_REV}."
+mapfile -t LEROBOT_RUNTIME < <(lerobot_runtime_specs)
+uv pip install -c "$TORCH_CONSTRAINT" -c "${REPO_ROOT}/requirements.txt" \
+  "${LEROBOT_RUNTIME[@]}" \
+  || die "Could not install the LeRobot arm packages."
 rm -f "$TORCH_CONSTRAINT"
 strip_nvidia_cuda
 
@@ -507,36 +537,27 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# 4b. Enforce numpy < 2 and huggingface-hub < 1.0
+# 4b. numpy and huggingface-hub must still match requirements.txt
 # -----------------------------------------------------------------------------
-# onnxruntime and the AMD/Ryzen wheels are compiled against the numpy 1.x ABI;
-# torch / ultralytics may have pulled numpy 2.x as a transitive upgrade, which
-# crashes every `import onnxruntime`. transformers requires huggingface-hub <1.0
-# but lerobot / optimum can drag in 1.x. Re-pin both as the last dependency
-# action so they can't be clobbered by an earlier step.
+# The LeRobot install above does not solve LeRobot's dependency set, so it
+# must not have moved either pin. ONNX Runtime needs the numpy 1.x ABI.
+# transformers needs huggingface-hub <1.0.
 NPVER="$(python -c 'import numpy,sys; print(numpy.__version__)' 2>/dev/null || echo none)"
 case "$NPVER" in
-  2.*|none)
-    log "Re-pinning numpy < 2 (found ${NPVER}; onnxruntime needs the 1.x ABI)"
-    uv pip install 'numpy<2' \
-      || warn "Could not downgrade numpy below 2.0 - onnxruntime imports may fail."
+  1.*)
+    log "numpy ${NPVER} OK (1.x ABI)"
     ;;
   *)
-    log "numpy ${NPVER} OK (1.x ABI)"
+    die "numpy is ${NPVER}. requirements.txt pins numpy<2. LeRobot must not change it."
     ;;
 esac
 
 HUBVER="$(python -c 'import huggingface_hub as h; print(h.__version__)' 2>/dev/null || echo none)"
-case "$HUBVER" in
-  1.*|none)
-    log "Re-pinning huggingface-hub < 1.0 (found ${HUBVER}; transformers requires <1.0)"
-    uv pip install 'huggingface_hub[cli]>=0.34,<1.0' \
-      || warn "Could not pin huggingface-hub below 1.0 - transformers imports may fail."
-    ;;
-  *)
-    log "huggingface-hub ${HUBVER} OK (<1.0)"
-    ;;
-esac
+if [[ "$(hub_pin_action "$HUBVER")" == "ok" ]]; then
+  log "huggingface-hub ${HUBVER} OK ($(hub_spec))"
+else
+  die "huggingface-hub is ${HUBVER}. requirements.txt pins $(hub_spec)."
+fi
 
 # onnx 1.18+ writes model IR version 13, which the VitisAI ORT runtime (max IR
 # 11) cannot load. Cap it so exported/probe models stay loadable on the NPU.
@@ -598,6 +619,12 @@ uv pip install 'mujoco>=3.1.3' 'PyOpenGL>=3.1' 'numpy<2' \
   && python -m so101_sim.assets \
   || warn "Digital twin install incomplete - --digital-twin will not work. Retry: python -m so101_sim.assets"
 
+# Editable and --no-deps: the notebook kernel and run_pipeline.sh both import
+# vla_pipeline. A pull does not copy this venv, so the install has to happen here.
+log "Installing vla_pipeline into the venv (editable, this clone)"
+uv pip install --no-deps -e "${REPO_ROOT}" \
+  || die "Could not install vla_pipeline from ${REPO_ROOT}"
+
 # -----------------------------------------------------------------------------
 # 4d. Enforce GUI-enabled OpenCV (LAST pip action, like onnxruntime)
 # -----------------------------------------------------------------------------
@@ -618,75 +645,22 @@ uv pip install 'opencv-contrib-python>=4.10' 'numpy<2' \
   || warn "GUI OpenCV install failed - cv2.imshow windows (yolo/mediapipe demos) may not open."
 
 # -----------------------------------------------------------------------------
-# 4e. ros2_control hardware side: topic_based_ros2_control into ros_ws/
-# -----------------------------------------------------------------------------
-# The venv stays out of this build: ament's CMake runs package.xml through
-# catkin_pkg, which only the system Python that ROS is built for has.
-log "Building topic_based_ros2_control ${TOPIC_BRIDGE_REF} into ros_ws/"
-if [[ ! -d "${ROS_WS}/src/topic_based_ros2_control/.git" ]]; then
-  git clone "$TOPIC_BRIDGE_REPO" "${ROS_WS}/src/topic_based_ros2_control"
-fi
-git -C "${ROS_WS}/src/topic_based_ros2_control" fetch --tags --quiet
-git -C "${ROS_WS}/src/topic_based_ros2_control" checkout --quiet --force "$TOPIC_BRIDGE_REF"
-for patch in "${REPO_ROOT}"/patches/topic_based_ros2_control/*.patch; do
-  git -C "${ROS_WS}/src/topic_based_ros2_control" apply "$patch" \
-    || die "Could not apply $(basename "$patch") to topic_based_ros2_control ${TOPIC_BRIDGE_REF}."
-done
-(
-  deactivate
-  set +u
-  # shellcheck disable=SC1091
-  source /opt/ros/jazzy/setup.bash
-  set -u
-  cd "$ROS_WS"
-  colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DPython3_EXECUTABLE=/usr/bin/python3
-) || die "topic_based_ros2_control build failed - see ${ROS_WS}/log/latest_build."
-
-# -----------------------------------------------------------------------------
 # 5. Models
 # -----------------------------------------------------------------------------
 if [[ "$SKIP_MODELS" -eq 0 ]]; then
-  mkdir -p "$MODELS_DIR" "$LLAMA_OUT_DIR" "${REPO_ROOT}/cache" "${REPO_ROOT}/logs"
-
-  log "Pre-downloading NPU-optimized Whisper ONNX (amd/whisper-base-en-onnx-npu)"
-  PYTHONPATH="${REPO_ROOT}" python - <<'PY' || warn "Whisper ONNX pre-download failed - it will be retried on first run; or set whisper.encoder_onnx/decoder_onnx in config/pipeline.yaml to local files (e.g. exported via scripts/export_whisper_onnx.py)."
-from vla_pipeline.audio.whisper_npu import download_whisper_onnx
-from vla_pipeline.utils.config import load_config, resolve
-cfg = load_config()
-mt = cfg["whisper"].get("model_type", "whisper-base")
-dest = resolve(cfg.get("system", {}).get("models_dir", "models")) / mt
-enc, dec = download_whisper_onnx(mt, dest_dir=dest)
-print("encoder:", enc)
-print("decoder:", dec)
-PY
-
-  log "Caching the Whisper tokenizer and feature extractor"
-  PYTHONPATH="${REPO_ROOT}" python - <<'PY' || warn "Whisper tokenizer download failed - the first voice run will try Hugging Face again. Check the network, then rerun ./bootstrap.sh --skip-apt --skip-llama."
-from vla_pipeline.audio.whisper_npu import download_whisper_tokenizer
-from vla_pipeline.utils.config import load_config
-cfg = load_config()
-w = cfg["whisper"]
-tok = download_whisper_tokenizer(w.get("model_type", "whisper-base"), w.get("tokenizer"))
-print("tokenizer:", tok)
-PY
+  mkdir -p "$MODELS_DIR" "${REPO_ROOT}/cache" "${REPO_ROOT}/logs"
 
   log "YOLO ONNX export is a manual setup step — see README"
 
-  log "Downloading Llama-3.2-3B-Instruct GGUF (Q4_K_M)"
-  if [[ -f "${LLAMA_OUT_DIR}/${LLAMA_GGUF_FILE}" ]]; then
-    echo "Already present: ${LLAMA_OUT_DIR}/${LLAMA_GGUF_FILE}"
-  else
-    hf download "$LLAMA_GGUF_REPO" "$LLAMA_GGUF_FILE" --local-dir "$LLAMA_OUT_DIR" \
-      || warn "GGUF download failed. Llama 3.2 is a gated/licensed model - log in with 'hf auth login' (accept the Llama 3.2 license on huggingface.co) or place ${LLAMA_GGUF_FILE} in ${LLAMA_OUT_DIR} manually."
-  fi
+  log "Gemma 4 E4B-IT, its audio projector and Silero VAD (skipped when present)"
+  VENV_DIR="$VENV_DIR" "${REPO_ROOT}/scripts/ensure_voice.sh" --models-only \
+    || die "The Gemma 4 voice models are not in place (see the ensure_voice line above)."
 else
   log "Skipping model download/export (--skip-models)"
 fi
 
 # -----------------------------------------------------------------------------
 # 5b. Compile the YOLO NPU models using the full Ryzen AI SDK venv
-# Whisper runs on the CPU (config whisper.device). Compile it only when
-# that field is set to npu: scripts/compile_npu_models.sh --only whisper
 # -----------------------------------------------------------------------------
 # The deployment .venv can RUN precompiled NPU models but cannot COMPILE them.
 # Compilation uses an externally installed full SDK venv. bootstrap never
@@ -718,7 +692,7 @@ python - <<'PY'
 import importlib, sys
 
 ok = True
-for mod in ("numpy", "cv2", "mediapipe", "onnxruntime", "transformers", "yaml", "psutil", "requests", "sounddevice"):
+for mod in ("numpy", "cv2", "mediapipe", "onnxruntime", "transformers", "yaml", "psutil", "requests", "sounddevice", "xacro", "control_msgs"):
     try:
         importlib.import_module(mod)
         print(f"  [ok] {mod}")
@@ -785,7 +759,6 @@ cat <<EOF
 
      python -m vla_pipeline.utils.resource_monitor
      ./workshop/launch_monitor.sh                 # always-on-top CPU%/GPU%/NPU inf/s HUD (open/close anytime)
-     python -m vla_pipeline.audio.whisper_npu --input /tmp/speech.wav --device npu
      python -m vla_pipeline.llm.llama_intent --selftest
      python -m vla_pipeline.vision.yolo_pose_npu
 

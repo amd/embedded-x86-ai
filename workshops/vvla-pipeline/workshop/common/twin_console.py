@@ -11,7 +11,7 @@ The same layout as the pipeline's ``run_pipeline.sh --digital-twin`` window
 (1200 x 1100)::
 
     +-----------------+-----------------+-----------------+
-    | mount: YOLO pose| mount: MediaPipe| arm: YOLO detect|   400 x 300 each
+    | mount pose           | mount hands      | arm detect           |   400 x 300 each
     +-----------------+-----------------+-----------------+
     |                                   | voice / intent  |
     |        3D view of the twin        | behavior log    |   800 x 800 + 400 x 800
@@ -38,6 +38,7 @@ import cv2
 import numpy as np
 
 from so101_sim import MOTOR_SHORT
+from so101_sim.tiles import DETECT, HANDS, POSE, VIEW, VOICE, with_processor
 
 from common.imaging import draw_skeleton
 from common.motion import GRIPPER_TORQUE_LIMIT
@@ -46,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 TILE_W, TILE_H = 400, 300
 VIEW_W, VIEW_H = 800, 800  # tall enough for the raised arm (wave)
-LOG_LINES = (VIEW_H - 230) // 20  # what fits between the header and the arm HUD
+LOG_LINES = (VIEW_H - 250) // 20  # what fits under the voice lines and above the arm HUD
 PANEL_W = 400
 IDLE_AFTER_S = 0.5  # a model untouched this long is run by the console itself
 FONT = cv2.FONT_HERSHEY_SIMPLEX
@@ -244,14 +245,14 @@ def jpeg(img: np.ndarray, quality: int = 80) -> bytes:
 def open_webcam(cfg: dict):
     """The webcam, YOLO-pose and MediaPipe Hands: ``(camera, pose, hands)``.
 
-    A scripted person stands in when the webcam gives no frame, for example
-    because another kernel holds it.
+    The mount camera is the one ``vla_pipeline.main`` builds for
+    ``./run_pipeline.sh --digital-twin``: the subscriber on the topic published
+    by the ``so101_sim.stack`` camera node.
     """
-    from common.fixtures import ScriptedHands, ScriptedPose, SyntheticCamera
     from common.quiet import QuietHands, quiet_stderr
     from models.hands import HandTracker
     from models.vision import PoseEstimator
-    from ros.camera_client import make_camera
+    from vla_pipeline.vision.camera import make_camera
 
     pose = PoseEstimator(cfg)
     # MediaPipe's C++ init writes to stderr (absl, EGL, TFLite); QuietHands
@@ -259,14 +260,7 @@ def open_webcam(cfg: dict):
     with quiet_stderr():
         hands = QuietHands(HandTracker(cfg))
         hands.process(np.zeros((64, 64, 3), np.uint8))
-    cam = make_camera(cfg, "mount")
-    if cam.read()[0]:
-        return cam, pose, hands
-    cam.close()
-    hands.close()
-    device = cfg["cameras"]["mount"].get("device")
-    print(f"webcam: no frames from {device} (in use by another kernel?) - a scripted person stands in")
-    return SyntheticCamera(), ScriptedPose(), ScriptedHands()
+    return make_camera(cfg, "mount"), pose, hands
 
 
 class TwinConsole:
@@ -399,14 +393,16 @@ class TwinConsole:
             ok, frame = self.view.read()
             frame = frame if ok else None
         img = _fit(frame, VIEW_W, VIEW_H, "no 3D view").copy()
-        _title(img, "digital twin")
+        _title(img, VIEW)
         return img
 
     def _panel(self) -> np.ndarray:
         p = np.full((VIEW_H, PANEL_W, 3), 28, np.uint8)
         now = time.monotonic()
-        y = 28
-        cv2.putText(p, "VOICE", (12, y), FONT, 0.55, WHITE, 1, cv2.LINE_AA)
+        y = 22
+        for line in VOICE:
+            cv2.putText(p, line, (12, y), FONT, 0.45, WHITE, 1, cv2.LINE_AA)
+            y += 18
         with self._lock:
             level, speaking, level_t = self._level, self._speaking, self._level_t
             log = list(self._log)
@@ -420,11 +416,11 @@ class TwinConsole:
             state, color = "transcribing...", YELLOW
         else:
             state, color = "listening", GRAY
-        cv2.putText(p, state, (90, y), FONT, 0.5, color, 1, cv2.LINE_AA)
+        cv2.putText(p, state, (12, y), FONT, 0.5, color, 1, cv2.LINE_AA)
         if self.voice == "mic":
             db = 20.0 * np.log10(max(level, 1e-6))
-            _bar(p, 12, y + 12, PANEL_W - 24, 10, (db + 60.0) / 50.0, GREEN if speaking else DIM)
-        y += 52
+            _bar(p, 12, y + 8, PANEL_W - 24, 10, (db + 60.0) / 50.0, GREEN if speaking else DIM)
+        y += 36
 
         if now - self._stop_flash < 1.0:
             cv2.rectangle(p, (0, y - 18), (PANEL_W, y + 8), RED, -1)
@@ -474,8 +470,8 @@ class TwinConsole:
 
     def _webcam_tiles(self, frame) -> list[np.ndarray]:
         pose, hands = self._pose_tile(frame).copy(), self._hands_tile(frame).copy()
-        _title(pose, f"mount: YOLO pose [{provider_name(self._pose, 'off')}]")
-        _title(hands, f"mount: MediaPipe hands [{'CPU' if self._hands else 'off'}]")
+        _title(pose, with_processor(POSE, provider_name(self._pose, "off")))
+        _title(hands, with_processor(HANDS, "CPU" if self._hands else "off"))
         return [pose, hands]
 
     def webcam_tiles(self) -> np.ndarray:
@@ -488,7 +484,7 @@ class TwinConsole:
         mount_frame = self.mount.latest() if self.mount is not None else None
         armcam = self.armcam.latest() if self.armcam is not None else None
         detect = self._detect_tile(armcam).copy()
-        _title(detect, f"arm: YOLO detect [{provider_name(self._detector, 'off')}]")
+        _title(detect, with_processor(DETECT, provider_name(self._detector, "off")))
         tiles = [*self._webcam_tiles(mount_frame), detect]
         return np.vstack([np.hstack(tiles), np.hstack([self._view_tile(), self._panel()])])
 

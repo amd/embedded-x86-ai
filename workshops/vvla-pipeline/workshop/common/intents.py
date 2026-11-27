@@ -16,6 +16,7 @@ the interesting work is *wiring them up* (see ``models/llm.py``,
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -59,17 +60,39 @@ class ParsedCommand:
         return self.params.get("object")
 
 
-# Transcript keywords that trigger STOP without an LLM round trip. Matched
-# case-insensitively as whole words on the raw transcript - the safety stop
-# must never wait on a language model.
-STOP_KEYWORDS = ("stop", "halt", "freeze", "abort", "emergency")
+# The only spoken stop. A bare "stop" is crowd noise on a tradeshow floor.
+# Matched as a phrase: a check for the word "stop" would also fire on
+# "stop talking".
+STOP_KEYWORDS = ("stop robot",)
 
 _STOP_RE = re.compile(r"\b(" + "|".join(STOP_KEYWORDS) + r")\b", re.IGNORECASE)
 
 
+def command_from_json(text: str) -> ParsedCommand | None:
+    """A command JSON string already produced by the audio model, or None."""
+    raw = (text or "").strip()
+    if not raw.startswith("{"):
+        return None
+    try:
+        data = json.loads(raw)
+        command = data["command"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return None
+    params: dict[str, str] = {}
+    obj = str(data.get("object", "") or "").strip()
+    if obj:
+        params["object"] = obj
+    heard = str(data.get("heard", "") or "").strip()
+    return ParsedCommand(Intent.from_string(str(command)), params=params, transcript=heard)
+
+
 def is_stop(transcript: str) -> bool:
     """True when the raw transcript contains a stop keyword."""
-    return bool(_STOP_RE.search(transcript or ""))
+    text = transcript or ""
+    if _STOP_RE.search(text):
+        return True
+    cmd = command_from_json(text)
+    return cmd is not None and cmd.intent is Intent.STOP
 
 
 class CommandRegistry:
@@ -110,9 +133,11 @@ class CommandRegistry:
 # Few-shot system prompt for the intent LLM. The GBNF grammar guarantees the
 # output *shape*; this prompt steers the *choice*.
 INTENT_SYSTEM_PROMPT = """\
-You are the command router for a robot arm. Map the user's spoken request to
-exactly one command and answer ONLY with a JSON object
-{"command": "<name>", "object": "<object or empty string>"}.
+You are the command router for a robot arm on a crowded floor. Other people
+are talking. Ignore background conversation, a second speaker, questions,
+quotes, negations, and anything not addressed to the robot: those are
+"unknown". Map a clear instruction to exactly one command and answer ONLY
+with a JSON object {"command": "<name>", "object": "<object or empty string>"}.
 "object" is the thing to act on for pick_place (one or two plain words,
 e.g. "ball", "water bottle"); for every other command use "".
 
@@ -131,9 +156,10 @@ Commands:
   object or drop it ("release", "open", "drop it", "let go",
   "open your hand").
 - "wave": the user wants a wave / greeting ("wave at me", "say hi").
-- "home": return to the rest/home position ("go home", "reset position",
-  "rest now").
-- "stop": stop moving immediately ("stop", "halt", "freeze").
+- "home": the speaker says "go home". "home", "rest", and "reset" alone
+  are "unknown".
+- "stop": the speaker says "stop robot". "stop", "halt", "freeze",
+  "stop it", "abort", and "stop talking" are "unknown".
 - "unknown": anything else.
 """
 

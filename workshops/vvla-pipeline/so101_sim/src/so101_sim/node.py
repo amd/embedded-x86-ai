@@ -24,19 +24,19 @@ Extra topic: ``/sim/view/image_raw`` (the free 3-D view, bgr8). Extra service:
 ``/sim/reset_scene`` (``std_srvs/Trigger``): ``restore_twin`` in this process,
 with the parked pose made the server's target.
 
-``--notebook-twin`` (workshop stack) is the twin ``02_digital_twin.ipynb``
-starts for its console, on a private ROS domain. It adds, on top of the
-default launch:
+The pipeline digital twin (``--stack pipeline``, the launch ``run_pipeline.sh``
+and ``run_notebooks.sh`` start) publishes the props (:class:`PropPublisher`):
+each prop's pose as a TF frame (``world`` to ``<prop>``), ``/sim/props_settled``
+(``std_msgs/Bool``: every prop at rest), and on ``/diagnostics`` which props
+both fingers hold and the gripper's torque limit and overload state.
+
+``--notebook-twin`` (workshop stack) adds, on top of that:
 
 * ``--scene FILE`` - props and pedestals from ``SimWorld.snapshot_scene``;
 * the grasp envelope (``GRASP_LIMITS``) as this process's clamp, so a 90 deg
   standing-grasp wrist reaches the twin;
 * the arm camera stamped with the time its scene was captured, not the time
-  it was published;
-* the props (:class:`PropPublisher`): each prop's pose as a TF frame
-  (``world`` to ``<prop>``), ``/sim/props_settled`` (``std_msgs/Bool``: every
-  prop at rest), and on ``/diagnostics`` which props both fingers hold and the
-  gripper's torque limit and overload state.
+  it was published.
 """
 
 from __future__ import annotations
@@ -337,8 +337,8 @@ def build_nodes(
     each closer on shutdown. Cameras with ``source: sim`` are rendered on the
     twin; ``source: device`` cameras are opened here only if
     ``device_cameras`` (otherwise their usual camera node serves them).
-    ``notebook_twin`` adds what ``02_digital_twin.ipynb``'s console needs
-    (see the module docstring); it requires the workshop stack.
+    The pipeline stack publishes the props. ``notebook_twin`` adds the workshop
+    console extras (see the module docstring) and requires the workshop stack.
     """
     from so101_sim.camera import SimCamera
 
@@ -375,7 +375,7 @@ def build_nodes(
     control = TwinControl(server, arm)
     nodes.append(control.node)
     closers.append(control.destroy)
-    if notebook_twin:
+    if stack == "pipeline" or notebook_twin:
         props = PropPublisher(world)
         nodes.append(props.node)
         closers.append(props.destroy)
@@ -406,11 +406,11 @@ def main() -> None:
     args, ros_args = ap.parse_known_args()
     if args.scene and not args.notebook_twin:
         ap.error("--scene needs --notebook-twin")
-    if args.notebook_twin:
-        # rclpy turns the SIGTERM into a clean shutdown.
-        from so101_sim.parent_death import die_with_parent
+    # The launch is the parent. When it exits, this process must exit too and
+    # drop the domain lock. rclpy turns this SIGTERM into a clean shutdown.
+    from so101_sim.parent_death import die_with_parent
 
-        die_with_parent()
+    die_with_parent()
 
     from so101_sim.domain_lock import DomainTaken, acquire
 

@@ -15,7 +15,11 @@ message conversions (``ros/arm_client.py``: TODO 2.7-2.9):
 - a move (:meth:`~ControllerArm.move_to`, and ``go_to``) is one
   ``FollowJointTrajectory`` goal to ``arm_controller``, timed by the servo
   profile planner (:mod:`common.servo_profile`) and carrying the caller's
-  tolerance; the controller's result says whether the joints got there;
+  tolerance. The goal erases the controller's ``goal_time``, so the
+  controller keeps commanding the last point until the measured position is
+  inside the goal; its result says the joints got there. A goal the arm
+  cannot meet ends when the arm server's velocities say it is still outside
+  that tolerance;
 - a streamed setpoint (:meth:`~ControllerArm.send_joints`: gesture mimic,
   person tracking) goes to ``arm_forward_controller``, switched in on the
   first one; the next move switches ``arm_controller`` back;
@@ -41,6 +45,7 @@ from so101_sim.control import (
     ARM_CONTROLLER,
     BRING_UP_S,
     GRIPPER_CONTROLLER,
+    HARDWARE_STATES,
     JOINT_STATE_STALE_S,
     SERVER_NODE,
     STREAM_CONTROLLER,
@@ -85,7 +90,8 @@ class ControllerArm(ArmClient):
         from controller_manager_msgs.msg import ControllerManagerActivity
         from controller_manager_msgs.srv import SwitchController
         from rclpy.parameter_client import AsyncParameterClient
-        from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+        from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+        from sensor_msgs.msg import JointState
         from std_msgs.msg import Float64MultiArray
         from std_srvs.srv import Trigger
 
@@ -99,8 +105,12 @@ class ControllerArm(ArmClient):
         self._stall_nm = float(sim["current_model"]["stall_torque_nm"])
         control_fps = float(cfg["robot"]["control_fps"])
         # The server's position-difference velocity reads one encoder step per
-        # tick while still; below one and a half of those the jaw has stopped.
-        self._jaw_still_rad_s = 1.5 * self._jmap.steps_to_rad("gripper", 1.0) * control_fps
+        # tick while still; below one and a half of those a joint has stopped.
+        self._still_rad_s = {
+            name: 1.5 * self._jmap.steps_to_rad(name, 1.0) * control_fps
+            for name in (*sim["joint_map"], "gripper")
+        }
+        self._jaw_still_rad_s = self._still_rad_s["gripper"]
         self._goal_time_s = goal_time_s()
         self._FollowJointTrajectory = FollowJointTrajectory
         self._SwitchController = SwitchController
@@ -109,6 +119,8 @@ class ControllerArm(ArmClient):
         self._cond = threading.Condition()
         self._state: dict | None = None  # calibrated units
         self._jaw_speed = 0.0  # rad/s
+        self._hardware_pos: dict[str, float] = {}  # calibrated, same sample as _velocity
+        self._velocity: dict[str, float] = {}  # rad/s, the arm server's hardware state
         self._effort_nm: float | None = None
         self._state_t = 0.0  # when the newest state arrived (monotonic)
         self._controllers: dict[str, str] = {}  # name -> state label, from the controller manager
@@ -125,6 +137,11 @@ class ControllerArm(ArmClient):
         self._Trigger = Trigger
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         node.create_subscription(ControllerManagerActivity, "/controller_manager/activity", self._on_activity, latched)
+        # Body joints export no velocity on /joint_states. The server publishes it here.
+        node.create_subscription(
+            JointState, HARDWARE_STATES, self._on_hardware_state,
+            QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=1),
+        )
         try:
             self._setup_ros(node)
             self._wait(
@@ -167,6 +184,27 @@ class ControllerArm(ArmClient):
     def _on_activity(self, msg) -> None:
         with self._cond:
             self._controllers = {c.name: c.state.label for c in msg.controllers}
+            self._cond.notify_all()
+
+    def _on_hardware_state(self, msg) -> None:
+        """Store one arm-server sample: position and velocity together.
+
+        A still check that pairs a newer ``/joint_states`` position with an
+        older velocity reports a moving arm as stopped.
+        """
+        known = set(BODY) | {"gripper"}
+        positions, speeds = {}, {}
+        velocities = msg.velocity
+        for i, name in enumerate(msg.name):
+            if name not in known or i >= len(msg.position):
+                continue
+            positions[name] = self._jmap.to_cal(name, float(msg.position[i]))
+            if i < len(velocities) and not math.isnan(velocities[i]):
+                speeds[name] = float(velocities[i])
+        if not speeds:
+            return
+        with self._cond:
+            self._hardware_pos, self._velocity = positions, speeds
             self._cond.notify_all()
 
     def _controllers_ready(self) -> bool:
@@ -256,9 +294,10 @@ class ControllerArm(ArmClient):
         self, target: dict, tolerance_deg: float = 2.5, stop_check=None, limits: dict | None = None,
     ) -> str:
         """One trajectory goal for the body, a command for the gripper; returns
-        ``"arrived"``, ``"blocked"`` (the controller ended the goal outside
-        ``tolerance_deg``) or ``"stopped"`` (``stop_check`` fired; the arm holds
-        where it is). A gripper-only move ends when the jaw stops."""
+        ``"arrived"`` (the controller reports the joints inside ``tolerance_deg``),
+        ``"blocked"`` (the arm server says those joints are still, and one is
+        outside ``tolerance_deg``) or ``"stopped"`` (``stop_check`` fired; the arm
+        holds where it is). A gripper-only move ends when the jaw stops."""
         from builtin_interfaces.msg import Duration
         from control_msgs.msg import JointTolerance
         from trajectory_msgs.msg import JointTrajectoryPoint
@@ -291,7 +330,14 @@ class ControllerArm(ArmClient):
                         JointTolerance(name=k, position=math.radians(tolerance_deg))
                         for k in body
                     ]
-                    how = self._run(goal, eta_s, stop_check)
+                    # -1 erases the controller's goal_time. It keeps commanding this
+                    # point until the measured position is inside the goal, then
+                    # holds that point. Time the simulator threw away does not abort
+                    # the move and hold the arm short of it.
+                    goal.goal_time_tolerance = Duration(sec=-1, nanosec=0)
+                    with self._cond:
+                        origin = {k: self._hardware_pos.get(k, start[k]) for k in body}
+                    how = self._run(goal, stop_check, body, origin, tolerance_deg)
                 else:
                     how = self._settle_jaw(
                         start["gripper"], target["gripper"], eta_s, tolerance_deg, stop_check
@@ -311,8 +357,59 @@ class ControllerArm(ArmClient):
             finally:
                 self._send_limits = previous
 
-    def _run(self, goal, eta_s: float, stop_check) -> str:
-        """Send ``goal`` and wait for the controller's result, cancelling it on a stop."""
+    def _await_body(self, finished, stop_check, body: dict, start: dict, tolerance_deg: float) -> str:
+        """``"result"``, ``"blocked"``, or ``"stopped"``.
+
+        Wakes on each joint state and on the controller's result. A joint state
+        that does not end the move starts the silence bound again. :data:`REPLY_S`
+        with no joint state means the stream stopped.
+        """
+        with self._cond:
+            while True:
+                seen = self._state_t
+
+                def pending(seen=seen) -> bool:
+                    return (
+                        finished.is_set()
+                        or self._held_short(start, body, tolerance_deg)
+                        or bool(stop_check and stop_check())
+                        or self._state_t != seen
+                    )
+
+                if not self._cond.wait_for(pending, REPLY_S):
+                    raise MotionTimeout(f"no joint state within {REPLY_S:.2f} s")
+                if finished.is_set():
+                    return "result"
+                if self._held_short(start, body, tolerance_deg):
+                    return "blocked"
+                if stop_check and stop_check():
+                    return "stopped"
+
+    def _held_short(self, start: dict, body: dict, tolerance_deg: float) -> bool:
+        """The server says every joint in ``body`` is still, one is outside
+        ``tolerance_deg``, and that joint has moved toward its goal. The rest
+        pose at the start of the move is not a block: the jaw's settle uses the
+        same "moved, then stopped short" rule. Caller holds ``_cond``."""
+        positions, speeds = self._hardware_pos, self._velocity
+        if not positions:
+            return False
+        for name in body:
+            if name not in speeds or name not in positions:
+                return False
+            if abs(speeds[name]) >= self._still_rad_s[name]:
+                return False
+        outside = [name for name, goal in body.items() if abs(positions[name] - goal) > tolerance_deg]
+        for name in outside:
+            goal = body[name]
+            toward = math.copysign(1.0, goal - start[name]) if goal != start[name] else 0.0
+            if (positions[name] - start[name]) * toward < tolerance_deg:
+                return False
+        return bool(outside)
+
+    def _run(self, goal, stop_check, body: dict, start: dict, tolerance_deg: float) -> str:
+        """Send ``goal`` and wait until the controller reports it, or the server says
+        the arm is still outside it. A stop cancels. A gap of :data:`REPLY_S` with
+        no joint state means the stream stopped."""
         from control_msgs.action import FollowJointTrajectory
 
         handle = self._call(self._trajectory.send_goal_async(goal), "the trajectory goal")
@@ -327,15 +424,17 @@ class ControllerArm(ArmClient):
                 self._cond.notify_all()
 
         result.add_done_callback(done)
-        budget = eta_s + self._goal_time_s + REPLY_S
         try:
-            stopped = not self._wait(finished.is_set, budget, "trajectory result", stop_check)
+            outcome = self._await_body(finished, stop_check, body, start, tolerance_deg)
         except MotionTimeout:
-            self._cancel_goal(handle, "trajectory budget expired")
+            self._cancel_goal(handle, "joint states stopped")
             raise
-        if stopped:
+        if outcome == "stopped":
             self._cancel_goal(handle, "stop requested")
             return "stopped"
+        if outcome == "blocked":
+            self._cancel_goal(handle, "the arm is still outside the goal")
+            return "blocked"
         result_msg = result.result()
         from action_msgs.msg import GoalStatus
         status = result_msg.status

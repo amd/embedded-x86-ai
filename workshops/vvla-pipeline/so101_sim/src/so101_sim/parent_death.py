@@ -16,9 +16,13 @@ wrapper sets its own parent-death signal and runs the command as its child:
 The wrapper leads a process group of its own, which CMD and everything CMD
 starts join. When the parent exits, the whole group gets SIGINT: a launch's
 nodes as well as the launch, which loses a node it was still starting. Once
-CMD has exited, whatever is left in the group is killed. SIGINT sent to the
-group, how its owner stops it, is CMD's to act on; the wrapper waits for CMD
-and exits with its status.
+CMD has exited, whatever is left in the group is killed. CMD gets ``STOP_S``
+to exit after that SIGINT; then it is killed with the rest, so the promise
+does not rest on CMD stopping. A ``ros2 launch`` was seen never to exit after
+SIGINT, with all its nodes gone (2026-11-25); ``so101_sim/ros_launch.py`` has
+the cause and removes it for the launches this repository starts. SIGINT sent
+to the group, how its owner stops it, is CMD's to act on; the wrapper waits
+for CMD and exits with its status.
 """
 
 from __future__ import annotations
@@ -28,6 +32,11 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+
+# How long a stopped command gets to exit before it is killed. A launch stopped with SIGINT
+# exited within 0.21 s (2026-11-25); one of its nodes that does not answer SIGINT gets
+# SIGTERM from the launch after 5 s. Its owner's stop (control.stop_controllers) waits as long.
+STOP_S = 10.0
 
 
 def die_with_parent(sig: int = signal.SIGTERM) -> None:
@@ -67,15 +76,26 @@ def main() -> None:
     if os.getpgrp() != os.getpid():
         os.setpgid(0, 0)
     pgid = os.getpgrp()
+
+    def kill_group(*_) -> None:
+        for pid in _group_members(pgid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def parent_exited(*_) -> None:
+        """Stop the group; when CMD has not exited STOP_S later, SIGALRM kills it."""
+        os.killpg(pgid, signal.SIGINT)
+        signal.setitimer(signal.ITIMER_REAL, STOP_S)
+
     signal.signal(signal.SIGINT, lambda *_: None)
-    signal.signal(signal.SIGTERM, lambda *_: os.killpg(pgid, signal.SIGINT))
+    signal.signal(signal.SIGALRM, kill_group)
+    signal.signal(signal.SIGTERM, parent_exited)
     die_with_parent(signal.SIGTERM)
     code = subprocess.Popen(sys.argv[1:]).wait()
-    for pid in _group_members(pgid):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    signal.setitimer(signal.ITIMER_REAL, 0)  # CMD has exited: what is left is killed now
+    kill_group()
     sys.exit(code if code >= 0 else 128 - code)
 
 

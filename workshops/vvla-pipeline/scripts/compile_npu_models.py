@@ -5,7 +5,7 @@
 # Portions of this file consist of AI-generated content. AI-assisted
 # content has been reviewed and validated by the authors.
 
-"""Compile the NPU models (Whisper + YOLO pose/detect) for the Ryzen AI NPU.
+"""Compile the NPU models (YOLO pose and detect) for the Ryzen AI NPU.
 
 This MUST run under the FULL Ryzen AI SDK environment (the venv created by
 ``install_ryzen_ai.sh``), which has the AIE/vaiml compiler. The deployment-only
@@ -20,7 +20,6 @@ are portable: afterwards the pipeline's ``.venv`` loads them with the deployment
 runtime - no recompile, no SDK needed at runtime.
 
 Models compiled (each keyed separately in cache/):
-  - whisper encoder + decoder    (config: whisper.*)
   - yolo26s-pose                 (config: yolo_pose.*)
   - yolo26s-detect               (config: yolo_detect.*) - voice pick-and-place
 
@@ -37,7 +36,6 @@ always match what the pipeline expects.
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -58,21 +56,6 @@ def _resolve(p: str | Path) -> Path:
     """Resolve p to an absolute path, relative to the repo root if not already absolute."""
     p = Path(p)
     return p if p.is_absolute() else REPO_ROOT / p
-
-
-def _ensure_local_onnx(w: dict) -> tuple[str, str]:
-    """Return encoder/decoder ONNX paths, downloading via the pipeline helper."""
-    enc = w.get("encoder_onnx")
-    dec = w.get("decoder_onnx")
-    if enc and dec and _resolve(enc).exists() and _resolve(dec).exists():
-        return str(_resolve(enc)), str(_resolve(dec))
-    # Reuse the pipeline's downloader so filenames/paths match exactly.
-    sys.path.insert(0, str(REPO_ROOT))
-    from vla_pipeline.audio.whisper_npu import download_whisper_onnx  # noqa: E402
-
-    model_type = w.get("model_type", "whisper-base")
-    dest = _resolve("models") / model_type
-    return download_whisper_onnx(model_type, dest_dir=dest)
 
 
 def _compile_one(
@@ -146,32 +129,6 @@ def _compile_one(
     print(f"  cache: {art_dir}")
 
 
-def _compile_whisper(cfg: dict) -> None:
-    """Compile the Whisper encoder and decoder ONNX models for the NPU."""
-    w = cfg["whisper"]
-    enc_onnx, dec_onnx = _ensure_local_onnx(w)
-    cache_dir = str(_resolve(w.get("cache_dir", "cache")))
-    enc_cfg = str(
-        _resolve(
-            w.get(
-                "encoder_vitisai_config", "config/vitisai_config_whisper_encoder.json"
-            )
-        )
-    )
-    dec_cfg = str(
-        _resolve(
-            w.get(
-                "decoder_vitisai_config", "config/vitisai_config_whisper_decoder.json"
-            )
-        )
-    )
-    mt = w.get("model_type", "whisper-base")
-    enc_key = w.get("cache_key_encoder", f"{mt.replace('-', '_')}_encoder")
-    dec_key = w.get("cache_key_decoder", f"{mt.replace('-', '_')}_decoder")
-    _compile_one("whisper encoder", enc_onnx, enc_cfg, cache_dir, enc_key)
-    _compile_one("whisper decoder", dec_onnx, dec_cfg, cache_dir, dec_key)
-
-
 def _compile_yolo_model(cfg: dict, section: str, name: str, export_hint: str) -> None:
     """Compile a YOLO ONNX model from the given config section, skipping if absent."""
     y = cfg.get(section)
@@ -212,17 +169,15 @@ def main() -> None:
     ap.add_argument("--config", default=str(REPO_ROOT / "config" / "pipeline.yaml"))
     ap.add_argument(
         "--only",
-        choices=["whisper", "yolo", "yolo_pose", "yolo_detect"],
+        choices=["yolo", "yolo_pose", "yolo_detect"],
         default=None,
-        help="compile just one model family (default: all). "
+        help="compile just one model family (default: both YOLO models). "
         "'yolo' = both pose and detect.",
     )
     args = ap.parse_args()
 
     cfg = _load_yaml(Path(args.config))
 
-    if args.only in (None, "whisper"):
-        _compile_whisper(cfg)
     if args.only in (None, "yolo", "yolo_pose"):
         _compile_yolo_pose(cfg)
     if args.only in (None, "yolo", "yolo_detect"):

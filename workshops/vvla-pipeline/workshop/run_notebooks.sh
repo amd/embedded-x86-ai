@@ -18,25 +18,24 @@
 #   2. Installs ONLY the dependencies that are missing (never clobbers an
 #      existing Ryzen AI onnxruntime; pins the versions the notebooks need,
 #      notably mediapipe 0.10.21 and numpy<2).
-#   3. Registers the "vvla-workshop" Jupyter kernel if it doesn't exist
-#      (the notebooks select it automatically).
+#   3. Registers the "vvla-workshop" Jupyter kernel for this clone on every
+#      launch (scripts/install_kernel.sh --register-only). That kernel.json is
+#      shared by every clone on this machine, so a launch must rewrite it.
 #   4. Sources ROS 2 (required) so the notebook kernel gets rclpy + DDS.
-#   5. Starts the llama-server on the iGPU (if the binary and the GGUF
-#      model are present and nothing is already listening on the port).
-#      It logs to workshop/logs/llama-server.log and shuts down when you
-#      quit Jupyter.
+#   5. scripts/ensure_voice.sh (run above the Jupyter launch) checks the
+#      Gemma 4 files and the built llama-server. A notebook that needs Gemma
+#      starts the server itself.
 #   6. Opens the always-on-top resource HUD (CPU% / GPU% / NPU inf/s) so you
 #      can watch the devices light up while a cell runs. It closes with Jupyter.
 #   7. Launches Jupyter Lab in workshop/ (browse the notebooks/ folder).
 #
 # Usage:
-#   ./run_notebooks.sh                 # set up + launch Jupyter Lab (+ llama server + HUD)
-#   ./run_notebooks.sh --force-kernel  # re-register the kernel
+#   ./run_notebooks.sh                 # set up + launch Jupyter Lab (+ HUD)
+#   ./run_notebooks.sh --force-kernel  # uninstall the kernel, then register it
 #   ./run_notebooks.sh --no-launch     # set everything up, don't start Jupyter
 #   ./run_notebooks.sh --classic       # use `jupyter notebook` instead of lab
-#   ./run_notebooks.sh --no-llm        # don't start the llama server
 #   ./run_notebooks.sh --no-monitor    # don't open the resource HUD
-#   ./run_notebooks.sh --test [args]   # steps 1-5, then the notebooks instead of Jupyter
+#   ./run_notebooks.sh --test [args]   # steps 1-4, then the notebooks instead of Jupyter
 #                                      # (args go to those tests). The twin and the NPU
 #                                      # tests are ../run_sim_tests.sh
 #
@@ -58,14 +57,13 @@ KERNEL_NAME="${KERNEL_NAME:-vvla-workshop}"
 KERNEL_DISPLAY="${KERNEL_DISPLAY:-Python (VVLA workshop)}"
 JUPYTER_PORT="${JUPYTER_PORT:-8888}"
 
-FORCE_KERNEL=0; NO_LAUNCH=0; LAUNCHER="lab"; WITH_LLM=1; WITH_MONITOR=1; TEST_MODE=0
+FORCE_KERNEL=0; NO_LAUNCH=0; LAUNCHER="lab"; WITH_MONITOR=1; TEST_MODE=0
 PYTEST_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --force-kernel) FORCE_KERNEL=1 ;;
     --no-launch)    NO_LAUNCH=1 ;;
     --classic)      LAUNCHER="notebook" ;;
-    --no-llm)       WITH_LLM=0 ;;
     --no-monitor)   WITH_MONITOR=0 ;;
     --test)         TEST_MODE=1; NO_LAUNCH=1; WITH_MONITOR=0; shift; PYTEST_ARGS=("$@"); break ;;
     -h|--help)      sed -n '/^# run_notebooks.sh/,/^# =====/p' "$0"; exit 0 ;;
@@ -73,10 +71,6 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
-if [[ "$TEST_MODE" -eq 1 && "$WITH_LLM" -eq 0 ]]; then
-  echo "--test needs the llama server: the Llama notebooks run against it (drop --no-llm)" >&2
-  exit 2
-fi
 
 # --- 1. Use the repo venv created by bootstrap.sh ----------------------------
 RYZEN_ENV_SCRIPT="${REPO_ROOT}/scripts/ryzen_ai_env.sh"
@@ -110,6 +104,11 @@ set +u +e
 # shellcheck disable=SC1090
 source "$ROS_SETUP" || warn "ROS 2 source returned nonzero - continuing"
 set -e -u
+# Packages, the venv path, and the controller plugin. A pull does not re-run
+# bootstrap, and without the plugin /joint_states never arrives.
+VENV_DIR="$VENV_DIR" "${REPO_ROOT}/scripts/ensure_ros2_control.sh"
+# The digital-twin notebook's microphone needs the voice models and llama-server.
+VENV_DIR="$VENV_DIR" "${REPO_ROOT}/scripts/ensure_voice.sh"
 
 # --- 2. Ensure pip, then install ONLY what's missing ------------------------
 "$PY" -m pip --version >/dev/null 2>&1 || {
@@ -156,6 +155,9 @@ done
 say "Installing so101_sim from this clone"
 "$PY" -m pip install --quiet --no-deps --upgrade --force-reinstall -e "${REPO_ROOT}/so101_sim"
 "$PY" -m so101_sim.assets || warn "could not fetch the SO-101 meshes - the digital twin will not load"
+# A pull does not re-run bootstrap. Without this, the kernel cannot import vla_pipeline.
+say "Installing vla_pipeline from this clone"
+"$PY" -m pip install --quiet --no-deps --upgrade --force-reinstall -e "${REPO_ROOT}"
 
 # ipykernel is handled separately (NOT in the presence-only loop above): it must
 # stay on the 6.x line. ipykernel 7.x removed Kernel.do_one_iteration(), which
@@ -202,24 +204,33 @@ elif [[ "$LAUNCHER" == "lab" ]] && ! "$PY" -c 'import jupyterlab' 2>/dev/null; t
   pip_install "jupyterlab>=4.0"
 fi
 
-# --- 3. Register the kernel if it doesn't already exist ---------------------
-_KERNEL_CHECK='import sys
-try:
-    from jupyter_client.kernelspec import KernelSpecManager
-    sys.exit(0 if sys.argv[1] in KernelSpecManager().find_kernel_specs() else 1)
-except Exception:
-    sys.exit(1)'
-kernel_exists() { "$PY" -c "$_KERNEL_CHECK" "$KERNEL_NAME" 2>/dev/null; }
-
+# --- 3. Register this clone's kernel on every launch ------------------------
+# scripts/install_kernel.sh owns kernel.json. --register-only rewrites the
+# shared spec from this tree and does not start the voice server or the NPU
+# preflight, which the steps above already ran. ipykernel install resets the
+# launcher command, so the bringup prefix is applied after that returns.
+KERNEL_ARGS=(--register-only --no-vscode)
 if [[ "$FORCE_KERNEL" -eq 1 ]]; then
-  "$PY" -m jupyter kernelspec uninstall -y "$KERNEL_NAME" >/dev/null 2>&1 || true
+  KERNEL_ARGS+=(--force)
 fi
-if [[ "$FORCE_KERNEL" -eq 0 ]] && kernel_exists; then
-  say "Kernel '${KERNEL_NAME}' already registered"
-else
-  say "Registering kernel '${KERNEL_NAME}' (${KERNEL_DISPLAY})"
-  "$PY" -m ipykernel install --user --name "$KERNEL_NAME" --display-name "$KERNEL_DISPLAY"
-fi
+"${REPO_ROOT}/scripts/install_kernel.sh" "${KERNEL_ARGS[@]}"
+# Both entry scripts run python -m so101_sim.bringup. This kernel does it
+# before any cell, so a Vitis session cannot start first.
+KERNEL_JSON="${HOME}/.local/share/jupyter/kernels/${KERNEL_NAME}/kernel.json"
+"$PY" - "$KERNEL_JSON" <<'PY'
+import json, sys
+path = sys.argv[1]
+spec = json.load(open(path))
+argv = spec["argv"]
+i = argv.index("-m")
+rest = argv[i + 2:]
+if rest[:1] == ["kernel"]:
+    rest = rest[1:]
+spec["argv"] = [*argv[: i + 1], "so101_sim.bringup", "kernel", *rest]
+with open(path, "w") as fh:
+    json.dump(spec, fh, indent=1)
+    fh.write("\n")
+PY
 
 # --- 4. Quick sanity line: what will this kernel actually see? --------------
 "$PY" - <<'PYEOF'
@@ -237,73 +248,42 @@ print("==> kernel sees: numpy %s | onnxruntime %s | mediapipe %s | NPU(VitisAI) 
       % (_v("numpy"), _v("onnxruntime"), _v("mediapipe"), "YES" if npu else "no (CPU fallback)"))
 PYEOF
 
-# --- 5. Start the llama server (component 1's brain, torn down on exit) -----
-LLAMA_BIN="${REPO_ROOT}/third_party/llama.cpp/build/bin/llama-server"
-LLAMA_GGUF="${REPO_ROOT}/models/llama-3.2-3b/Llama-3.2-3B-Instruct-Q4_K_M.gguf"
-LLAMA_HOST="${LLAMA_HOST:-127.0.0.1}"
-LLAMA_PORT="${LLAMA_PORT:-8081}"
-LLAMA_PID=""
 MONITOR_PID=""
+LAUNCH_PIDS=()
 cleanup() {
-  [[ -n "$LLAMA_PID" ]] && kill -INT "$LLAMA_PID" 2>/dev/null || true
+  # The same stop as run_pipeline.sh: SIGINT to each so101_sim.stack group, then wait.
+  trap '' INT
+  local pid
+  for pid in "${LAUNCH_PIDS[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -INT -- "-$pid" 2>/dev/null || true
+    fi
+  done
+  for pid in "${LAUNCH_PIDS[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
   [[ -n "$MONITOR_PID" ]] && kill "$MONITOR_PID" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
-llama_alive() {
-  "$PY" - "$LLAMA_HOST" "$LLAMA_PORT" <<'PYEOF'
-import sys, urllib.request
-try:
-    r = urllib.request.urlopen(f"http://{sys.argv[1]}:{sys.argv[2]}/health", timeout=1)
-    sys.exit(0 if r.status == 200 else 1)
-except Exception:
-    sys.exit(1)
-PYEOF
+# The digital twin. Same two Python launches as ./run_pipeline.sh --digital-twin,
+# before the kernel's python -m so101_sim.bringup kernel.
+start_digital_twin() {
+  command -v ros2 >/dev/null || die "ROS 2 not found - install ROS 2 Jazzy (/opt/ros/jazzy)."
+  # shellcheck disable=SC1091
+  source "${VENV_DIR}/bin/activate"
+  cd "$REPO_ROOT"
+  python -m so101_sim.stack --arm false --cameras true --digital-twin true --dry-run false &
+  LAUNCH_PIDS+=("$!")
+  python -m so101_sim.stack --arm true --cameras false --digital-twin true --dry-run false &
+  LAUNCH_PIDS+=("$!")
 }
 
-if [[ "$WITH_LLM" -eq 1 ]]; then
-  if llama_alive; then
-    say "llama-server already running at http://${LLAMA_HOST}:${LLAMA_PORT} - using it"
-  elif [[ -x "$LLAMA_BIN" && -f "$LLAMA_GGUF" ]]; then
-    mkdir -p "${WORKSHOP_DIR}/logs"
-    LLAMA_LOG="${WORKSHOP_DIR}/logs/llama-server.log"
-    LLAMA_LOG_FROM=$(( $( [[ -f "$LLAMA_LOG" ]] && wc -l < "$LLAMA_LOG" || echo 0 ) + 1 ))
-    say "Starting llama-server on the iGPU (port ${LLAMA_PORT})"
-    say "  log: ${LLAMA_LOG}"
-    HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION:-11.5.0}" \
-      "$LLAMA_BIN" --model "$LLAMA_GGUF" \
-      --host "$LLAMA_HOST" --port "$LLAMA_PORT" \
-      --n-gpu-layers 99 --ctx-size 2048 --parallel 1 --no-warmup \
-      >>"$LLAMA_LOG" 2>&1 &
-    LLAMA_PID=$!
-    say "  llama-server PID ${LLAMA_PID} (auto-stops when you quit Jupyter;"
-    say "  first load takes 10-30 s while the model streams into iGPU memory)"
-  else
-    [[ "$TEST_MODE" -eq 1 ]] && die "llama-server binary or GGUF model not found (${LLAMA_BIN}, ${LLAMA_GGUF}) - run ./bootstrap.sh"
-    warn "llama-server binary or GGUF model not found - skipping."
-    warn "  expected binary: ${LLAMA_BIN}"
-    warn "  expected model:  ${LLAMA_GGUF}"
-    warn "  (run the repo bootstrap to build/download them; the 03_igpu_llama"
-    warn "   notebook shows the exact command to start the server yourself)"
-  fi
-fi
-
 # --test: the notebooks, in this environment. Twin and NPU tests are ../run_sim_tests.sh.
+# The docs tests start their own twin on ROS domain 93. This shell's
+# ROS_DOMAIN_ID is often 93 too, so starting the launch here makes those
+# tests see a twin that is already running.
 if [[ "$TEST_MODE" -eq 1 ]]; then
-  if [[ -n "$LLAMA_PID" ]]; then
-    # The server logs "listening on http://..." once its model is loaded. tail
-    # follows the log from where this server's lines start and ends when the
-    # server exits, which grep then sees as the end of its input.
-    say "Waiting for llama-server to log that it is listening (${LLAMA_LOG})"
-    exec {llama_fd}< <(tail -n "+${LLAMA_LOG_FROM}" -F --pid="$LLAMA_PID" "$LLAMA_LOG")
-    LLAMA_TAIL_PID=$!
-    LLAMA_READY=0
-    timeout 90 grep -m1 -q "listening on http://" <&"$llama_fd" || LLAMA_READY=$?
-    kill "$LLAMA_TAIL_PID" 2>/dev/null || true
-    exec {llama_fd}<&-
-    [[ "$LLAMA_READY" -eq 0 ]] || die "llama-server did not report listening within 90 s - see ${LLAMA_LOG}"
-  fi
-  llama_alive || die "llama-server does not answer at http://${LLAMA_HOST}:${LLAMA_PORT} - see ${WORKSHOP_DIR}/logs/llama-server.log"
   for entry in "pytest:pytest" "pytest_timeout:pytest-timeout" "nbclient:nbclient"; do
     "$PY" -c "import ${entry%%:*}" 2>/dev/null || pip_install "${entry#*:}"
   done
@@ -316,7 +296,7 @@ fi
 # --- 6. Pop the always-on-top resource HUD (CPU/GPU/NPU), torn down on exit --
 # Only when we're really launching Jupyter and a display is available. It reuses
 # launch_monitor.sh, logs to workshop/logs/monitor.log, and the cleanup trap
-# kills it (alongside the llama server) when Jupyter exits.
+# kills it when Jupyter exits.
 if [[ "$WITH_MONITOR" -eq 1 && "$NO_LAUNCH" -eq 0 ]]; then
   if [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ]]; then
     mkdir -p "${WORKSHOP_DIR}/logs"
@@ -356,8 +336,9 @@ with open(path, "w") as fh:
     fh.write("\n")
 PY
 
+start_digital_twin
 say "Launching Jupyter ${LAUNCHER} - the workshop kernel is auto-selected"
 cd "$WORKSHOP_DIR"
-# Not exec'd: keep this shell alive so the trap tears the llama server down
+# Not exec'd: keep this shell alive so the trap stops the digital twin
 # after Jupyter exits.
 "$PY" -m jupyter "$LAUNCHER" notebooks --port "$JUPYTER_PORT"

@@ -21,6 +21,8 @@ import csv
 import os
 import select
 import shutil
+import signal
+import subprocess
 import threading
 import time
 from collections import deque
@@ -34,6 +36,78 @@ TEST_DOMAIN_ID = int(os.environ.get("TWIN_TEST_DOMAIN_ID", "93"))
 # folding onto the forearm, as it would from the rest pose.
 EXTENDED = {"shoulder_lift": -20.0, "elbow_flex": 20.0, "wrist_flex": 0.0}
 BODY_JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll")
+
+
+def start_pipeline_launches(
+    log, *, digital_twin: bool = True, dry_run: bool = False, cameras: bool = True,
+) -> list:
+    """The ``python -m so101_sim.stack`` commands ``run_pipeline.sh`` runs.
+
+    The defaults are the digital twin ``run_notebooks.sh`` starts.
+    ``digital_twin=False`` is the real arm; ``dry_run=True`` leaves the motors
+    off, which is ``./run_pipeline.sh --dry-run``. The child inherits this
+    process's ROS domain. The call returns when the arm launch logs that it
+    is publishing.
+    """
+    from so101_sim.stack import command
+
+    join_test_domain()
+    os.environ["PYTHONUNBUFFERED"] = "1"
+    procs = []
+    if cameras:
+        procs.append(subprocess.Popen(
+            command(arm=False, cameras=True, digital_twin=digital_twin, dry_run=dry_run),
+            stdout=log, stderr=subprocess.STDOUT,
+        ))
+    arm = subprocess.Popen(
+        command(arm=True, cameras=False, digital_twin=digital_twin, dry_run=dry_run),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+    _wait_until_publishing(arm, log)
+    procs.append(arm)
+    return procs
+
+
+def _wait_until_publishing(arm_launch: subprocess.Popen, log) -> None:
+    """Block on the arm launch's stdout until the twin logs ``Ready - cmd:`` or the pipe closes."""
+    ready = False
+    assert arm_launch.stdout is not None
+    for line in arm_launch.stdout:
+        log.write(line)
+        log.flush()
+        if b"Ready - cmd:" in line:
+            ready = True
+            break
+    if not ready:
+        name = getattr(log, "name", None)
+        text = Path(name).read_text(errors="replace")[-2000:] if name else ""
+        raise RuntimeError(f"the arm launch exited before it was publishing:\n{text}")
+    threading.Thread(
+        target=_keep_log, args=(arm_launch.stdout, log), daemon=True, name="twin-arm-log",
+    ).start()
+
+
+def _keep_log(stream, log) -> None:
+    """Copy the rest of the arm launch's output into the test log."""
+    try:
+        for line in stream:
+            log.write(line)
+            log.flush()
+    except Exception:
+        return
+
+
+def stop_pipeline_launches(procs) -> None:
+    """SIGINT each launch, then its exit. A launch that already called ``setsid`` is its own group."""
+    for proc in procs:
+        if proc.poll() is not None:
+            continue
+        if os.getpgid(proc.pid) == proc.pid:
+            os.killpg(proc.pid, signal.SIGINT)
+        else:
+            proc.send_signal(signal.SIGINT)
+    for proc in procs:
+        proc.wait()
 
 
 def join_test_domain() -> None:
@@ -286,7 +360,7 @@ def quat_close(a, b, tol: float = 1e-3) -> bool:
 
 
 def keyword_parse(text: str):
-    """The notebook's keyword stand-in for Llama."""
+    """The notebook's keyword stand-in for Gemma."""
     from common.fixtures import offline_parse_text
     from common.intents import Intent, ParsedCommand
 
@@ -296,14 +370,16 @@ def keyword_parse(text: str):
 
 
 class TwinRig:
-    """The section 5 console's context, on a :class:`~common.twin_ros.TwinSession`.
+    """The section 4 console's context, on a :class:`~common.twin_ros.TwinSession`.
 
     The arm camera and the mount camera are wrapped in ``FanoutCamera``
     as the console wraps them, and the operator is the notebook's scripted
     stand-in (``ScriptedPose`` / ``ScriptedHands`` / ``SyntheticCamera``).
     """
 
-    def __init__(self, cfg: dict, detector, scene: dict | None = None):
+    def __init__(self, cfg: dict, detector):
+        import tempfile
+
         from common.fixtures import ScriptedHands, ScriptedPose, SyntheticCamera
         from common.motion import mapper_from_config
         from common.twin_console import FanoutCamera
@@ -312,7 +388,14 @@ class TwinRig:
 
         self.cfg = copy.deepcopy(cfg)
         self.cfg["robot"]["backend"] = "sim"
-        self.twin = TwinSession(self.cfg, scene=scene)
+        self._log = tempfile.NamedTemporaryFile(prefix="twin_rig_", suffix=".log", delete=False)
+        self.log_path = Path(self._log.name)
+        self._launches = start_pipeline_launches(self._log)
+        try:
+            self.twin = TwinSession(self.cfg)
+        except BaseException:
+            stop_pipeline_launches(self._launches)
+            raise
         self.said: list[str] = []
         self.armcam = FanoutCamera(self.twin.armcam)
         self.mount = FanoutCamera(SyntheticCamera())
@@ -337,7 +420,7 @@ class TwinRig:
     def failure_report(self, dest: Path, since: float | None) -> str:
         """What the robot said, and the twin node's log."""
         said = "\n".join(f"  {m}" for m in self.said[-15:]) or "  (nothing)"
-        return f"robot said:\n{said}\n\n" + twin_log_report(self.twin.log_path, dest)
+        return f"robot said:\n{said}\n\n" + twin_log_report(self.log_path, dest)
 
     def start(self, text: str) -> threading.Thread:
         """Run ``text`` through ``handle_transcript`` on a thread, as the console's dispatcher does.
@@ -368,7 +451,7 @@ class TwinRig:
         """The console's stop button: ``handle_transcript`` with "stop", from another thread."""
         from integration.dispatch import handle_transcript
 
-        handle_transcript(self.ctx, "stop", keyword_parse)
+        handle_transcript(self.ctx, "stop robot", keyword_parse)
 
     def close(self) -> None:
         from rigs import raise_crashes
@@ -380,4 +463,5 @@ class TwinRig:
             except Exception:
                 pass
         self.twin.close()
+        stop_pipeline_launches(self._launches)
         raise_crashes(self._crashes)

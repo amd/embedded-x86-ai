@@ -10,7 +10,7 @@
 The architecture rule is *"server nodes own hardware; everything else
 subscribes."* On the rig that means one process per device: the SO-101 arm
 bus (with its ros2_control controllers, ``launch/so101_control.launch.py``),
-each camera, and (optionally) the Llama intent brain. Rather than make you
+each camera, and (optionally) the Gemma intent brain. Rather than make you
 open a terminal per node, the live app (and the workshop launcher) start them
 here as child processes, wait until each is actually publishing, and tear them
 all down on exit - SIGINT first so the arm parks at ``REST_POSE``.
@@ -104,9 +104,8 @@ def _node_specs(
     The arm (or twin) runs on the hardware side's topics, and its controllers
     (``launch/so101_control.launch.py``) start right after it.
     """
-    import shutil
-
     from so101_sim.control import HARDWARE_COMMANDS, HARDWARE_STATES, LAUNCH_FILE
+    from so101_sim.ros_launch import python_args
 
     cams = cfg.get("cameras") or {}
     robot = cfg.get("robot") or {}
@@ -128,7 +127,7 @@ def _node_specs(
             key="controllers",
             label="SO-101 controllers (ros2_control)",
             ready_topic="/joint_states",
-            argv=[shutil.which("ros2") or "ros2", "launch", str(LAUNCH_FILE), f"config:={cfg_file}", "stack:=workshop"],
+            argv=python_args(LAUNCH_FILE, f"config:={cfg_file}", "stack:=workshop"),
         ),
         "camera_mount": _Child(
             key="camera_mount",
@@ -158,7 +157,7 @@ def _node_specs(
         ),
         "intent": _Child(
             key="intent",
-            label="Llama intent node",
+            label="Gemma intent node",
             ready_topic=intent.get("intent_topic", "/vla/intent"),
             argv=["-m", "ros.intent_node", *(["--mock"] if mock else [])],
         ),

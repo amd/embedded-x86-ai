@@ -23,7 +23,7 @@ import pytest
 
 from twin_ros_rig import TEST_DOMAIN_ID, assert_domain_free, join_test_domain
 
-pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.slow, pytest.mark.timeout(240)]
+pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.slow, pytest.mark.timeout(30)]
 pytest.importorskip("rclpy")
 
 # Jaws low over the table, closing axis horizontal: how the pickup grasps the ball.
@@ -62,13 +62,17 @@ def twin(pipeline_cfg):
         arm = Ros2ArmClient(cfg)
         yield world, arm
     finally:
-        if arm is not None:
-            arm.close()
-        stop_controllers(launch)
-        host.close()
-        for close in reversed(closers):
-            close()
-        lock.close()
+        try:
+            if arm is not None:
+                arm.close()
+        finally:
+            try:
+                stop_controllers(launch)
+            finally:
+                host.close()
+                for close in reversed(closers):
+                    close()
+                lock.close()
 
 
 @pytest.fixture
@@ -103,7 +107,7 @@ def test_a_stop_cancels_the_move_and_the_arm_holds(arm):
 
 
 def test_a_goal_the_joints_cannot_meet_is_blocked(arm):
-    """Tighter than one encoder step: the trajectory controller ends the goal as a tolerance violation."""
+    """Tighter than one encoder step: the arm settles still, outside the goal."""
     _world, client = arm
     assert client.move_to({"shoulder_pan": 10.0}, tolerance_deg=1e-4) == "blocked"
 

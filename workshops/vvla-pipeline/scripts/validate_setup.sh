@@ -3,12 +3,11 @@
 #
 #   ./scripts/validate_setup.sh
 #   ./scripts/validate_setup.sh --full
-#   ./scripts/validate_setup.sh --full --wav /path/to/speech.wav
 #
 # The default run checks scripts, requirements, the external SDK environment,
 # the VAIML caches already in cache/, and an existing deployment .venv.
 # It never compiles. --full repeats bootstrap with --skip-compile so those
-# caches stay in place. --wav runs Whisper on the NPU against the existing cache.
+# caches stay in place.
 
 set -uo pipefail
 
@@ -16,28 +15,21 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SDK_ROOT="${RYZEN_AI_WHEELS:-${HOME}/ryzen_ai-1.7.1}"
 SDK_VENV="${RYZEN_AI_VENV:-${SDK_ROOT}/venv}"
 FULL=0
-WAV="${WHISPER_WAV:-}"
 PASSES=0
 FAILURES=0
 
 usage() {
   cat <<EOF
-Usage: ./scripts/validate_setup.sh [--full] [--wav FILE]
+Usage: ./scripts/validate_setup.sh [--full]
 
   default   static checks, SDK VitisAI registration, existing VAIML caches, and .venv
   --full    also repeat bootstrap with --skip-compile
-  --wav     transcribe FILE with Whisper on the NPU, using cache/
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --full) FULL=1 ;;
-    --wav)
-      shift
-      WAV="${1:-}"
-      [[ -n "$WAV" ]] || { echo "--wav needs a file" >&2; exit 2; }
-      ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -76,7 +68,6 @@ run_check "python syntax" python3 -m py_compile \
   "$REPO_ROOT/scripts/compile_npu_models.py" \
   "$REPO_ROOT/scripts/verify_npu_stack.py" \
   "$REPO_ROOT/vla_pipeline/utils/npu_session.py" \
-  "$REPO_ROOT/vla_pipeline/audio/whisper_npu.py" \
   "$REPO_ROOT/vla_pipeline/main.py"
 
 run_check "scripts are executable" bash -c '
@@ -199,32 +190,6 @@ run_check "existing VAIML caches are reused" bash -c '
     echo "reuse $rai"
   done
 ' bash "$REPO_ROOT" "${VAIML_KEYS[@]}"
-
-if [[ -n "$WAV" ]]; then
-  run_check "Whisper WAV uses VitisAI" bash -c '
-    set -euo pipefail
-    set +u
-    cd "$1"
-    export RYZEN_AI_WHEELS="$2" RYZEN_AI_VENV="$3"
-    # shellcheck disable=SC1091
-    source .venv/bin/activate
-    # shellcheck disable=SC1091
-    source scripts/ryzen_ai_env.sh
-    log="$(mktemp)"
-    python -m vla_pipeline.audio.whisper_npu --input "$4" --device npu >"$log" 2>&1
-    status=$?
-    cat "$log"
-    [[ "$status" -eq 0 ]] || exit "$status"
-    grep -q "Whisper active providers" "$log" || exit 1
-    python - "$log" <<PY
-import re, sys
-text = open(sys.argv[1]).read()
-match = re.search(r"Whisper active providers.*", text)
-if not match or "VitisAIExecutionProvider" not in match.group(0):
-    sys.exit(1)
-PY
-  ' bash "$REPO_ROOT" "$SDK_ROOT" "$SDK_VENV" "$WAV"
-fi
 
 echo
 printf 'Result: %d passed, %d failed\n' "$PASSES" "$FAILURES"

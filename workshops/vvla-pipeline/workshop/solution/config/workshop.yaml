@@ -44,13 +44,6 @@ mediapipe:                          # fingers (pinch) - CPU
   min_tracking_confidence: 0.5
   roll_ti_full_px: 40.0
 
-whisper:                            # ears (speech → text) - CPU (common/speech.py)
-  encoder_onnx: ../../models/whisper-base/encoder_model.onnx
-  decoder_onnx: ../../models/whisper-base/decoder_model.onnx
-  tokenizer: openai/whisper-base.en # must match the checkpoint (English-only base)
-  language: en
-  cpu_threads: 4                    # per session; ONNX Runtime's default takes every core and starves the twin
-
 audio:                              # microphone + voice-activity detection
   mic_device: null                  # null = default input (or an index from `python -m sounddevice`)
   silence_threshold: 0.015          # energy-VAD noise floor (RMS) when webrtcvad is missing
@@ -61,11 +54,12 @@ audio:                              # microphone + voice-activity detection
   max_utterance_s: 12.0
   startup_grace_s: 1.5              # ignore the mic's first noisy moments
 
-llm:                                # brain (intent) - iGPU via llama.cpp + ROCm/HIP
+gemma4-e4b-it:                     # brain (intent) - Gemma 4 E4B audio on the iGPU
   server_bin: ../../third_party/llama.cpp/build/bin/llama-server
-  model_gguf: ../../models/llama-3.2-3b/Llama-3.2-3B-Instruct-Q4_K_M.gguf
+  model_gguf: ../../models/gemma-4-E4B-it/gemma-4-E4B-it-Q4_0.gguf
+  mmproj: ../../models/gemma-4-E4B-it/mmproj-gemma-4-E4B-it-Q8_0.gguf
   host: 127.0.0.1
-  port: 8081
+  port: 8082
   n_gpu_layers: 99                  # everything on the iGPU
   ctx_size: 2048                    # MUST stay capped - native 131072 OOMs the iGPU carve-out
   grammar_file: config/intent.gbnf
@@ -126,7 +120,7 @@ sim:                                # MuJoCo digital twin (app.py --digital-twin
     mount: {camera: mount_cam, width: 640, height: 480, fps: 30}
     view: {camera: free, width: 800, height: 800, fps: 30, lookat: [0.17, 0.0, 0.18], distance: 0.9}
 
-intent_node:                        # the Llama intent node (component 2)
+intent_node:                        # the Gemma intent node (component 2)
   transcript_topic: /vla/transcript # std_msgs/String in (what was said)
   intent_topic: /vla/intent         # std_msgs/String out (JSON {"command","object"})
 

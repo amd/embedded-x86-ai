@@ -8,7 +8,8 @@
 """ROS 2 launch: ros2_control for the SO-101 over the arm server's topics.
 
 robot_state_publisher publishes the description, ``ros2_control_node`` runs
-the controllers at ``robot.control_fps``, and ``topic_based_ros2_control``
+the controllers at ``robot.control_fps``, ``so101_sim.controller_bringup``
+loads and activates them, and ``topic_based_ros2_control``
 talks to the arm server (or the twin) on ``/so101/hardware/joint_commands`` and
 ``/so101/hardware/joint_states``, in radians; the controller manager finds it
 in ``ros_ws/`` (bootstrap.sh builds it). Run it with the venv's Python, after
@@ -23,7 +24,7 @@ import sys
 from pathlib import Path
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -66,8 +67,12 @@ def _nodes(context):
         initial_state_timeout=SERVER_START_S,
     )
     controllers = str(CONTROLLERS_FILE)
-    spawn = ["--controller-manager", "/controller_manager", "--param-file", controllers]
+    active = ["joint_state_broadcaster", ARM_CONTROLLER, GRIPPER_CONTROLLERS[gripper]]
     inactive = [STREAM_CONTROLLER, *(name for key, name in GRIPPER_CONTROLLERS.items() if key != gripper)]
+    # Each controller with a section of its own in the controllers file reads its parameters
+    # from it. The controller manager is told so here, as a parameter, and not by a request.
+    own_parameters = set(yaml.safe_load(CONTROLLERS_FILE.read_text())) - {"controller_manager"}
+    params_files = {f"{name}.params_file": [controllers] for name in (*active, *inactive) if name in own_parameters}
     return [
         Node(
             package="robot_state_publisher",
@@ -78,21 +83,20 @@ def _nodes(context):
         Node(
             package="controller_manager",
             executable="ros2_control_node",
-            parameters=[controllers, {"update_rate": int(round(float(cfg["robot"]["control_fps"])))}],
+            parameters=[
+                controllers, {"update_rate": int(round(float(cfg["robot"]["control_fps"])))}, params_files,
+            ],
             remappings=[("~/robot_description", "/robot_description")],
             additional_env={"AMENT_PREFIX_PATH": bridge_prefix_path()},
             output="screen",
         ),
-        Node(
-            package="controller_manager",
-            executable="spawner",
-            arguments=["joint_state_broadcaster", ARM_CONTROLLER, GRIPPER_CONTROLLERS[gripper], *spawn],
-            output="screen",
-        ),
-        Node(
-            package="controller_manager",
-            executable="spawner",
-            arguments=[*inactive, "--inactive", *spawn],
+        # Loads, configures and activates the controllers on the controller manager's own
+        # status reports. ROS's spawner waits for a reply to each request, and a reply can be
+        # lost: see so101_sim/controller_bringup.py.
+        ExecuteProcess(
+            cmd=[sys.executable, "-m", "so101_sim.controller_bringup",
+                 "--active", *active, "--inactive", *inactive],
+            name="controller_bringup",
             output="screen",
         ),
     ]

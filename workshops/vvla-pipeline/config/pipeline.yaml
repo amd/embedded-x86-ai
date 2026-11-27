@@ -8,6 +8,40 @@ system:
   cache_dir: cache            # VitisAI NPU compile cache (first compile is slow)
   log_dir: logs
 
+# gemma4-e4b-it: Silero on the CPU, Gemma 4 E4B audio on the iGPU via llama-server.
+# A sentence is sent the moment the speaker has been silent for end_silence_ms.
+voice_intent: gemma4-e4b-it
+
+gemma4-e4b-it:
+  server_bin: third_party/llama.cpp/build/bin/llama-server
+  model_gguf: models/gemma-4-E4B-it/gemma-4-E4B-it-Q4_0.gguf
+  mmproj: models/gemma-4-E4B-it/mmproj-gemma-4-E4B-it-Q8_0.gguf
+  host: 127.0.0.1
+  port: 8082
+  n_gpu_layers: 99
+  ctx_size: 2048              # a 6 s clip is about 150 audio tokens
+  grammar_file: config/intent.gbnf
+  autostart: true
+  temperature: 0.0
+  parallel: 1
+  no_warmup: true
+  hsa_override_gfx_version: "11.5.0"  # Strix Point; "11.5.1" is Strix Halo
+  vad_model: models/silero_vad.onnx
+  window_s: 6                 # the longest utterance; one that grows to it is sent as it is
+  # An utterance is sent once the speaker has been silent this long. Lower sends sooner and
+  # cuts a sentence at a shorter pause: a pause after a comma is 220 to 260 ms.
+  end_silence_ms: 300
+  pre_roll_ms: 300            # sound kept from before the first speech frame: the detector answers late
+  # A frame quieter than this is not speech, whatever Silero says. Of the sound with the
+  # microphone's constant offset taken out; -60 leaves the decision to Silero. Raise it only
+  # in a loud room: a quiet microphone's speech frames are around -43 dBFS.
+  min_dbfs: -60
+  vad_threshold: 0.5
+  min_voice_ms: 100           # an utterance with less speech than this (a click, a cough) is dropped
+  sent_peak: 0.5              # an utterance is sent with its loud samples at this share of full scale,
+  most_gain: 20               # raised by this factor at most: Gemma hears quiet sound worse
+  max_age_s: 10               # an utterance that waited longer than this for Gemma is not asked
+
 audio:
   sample_rate: 16000
   mic_device: null            # null = default input device (or index from `python -m sounddevice`)
@@ -15,53 +49,8 @@ audio:
   max_utterance_s: 12.0
   wake_word: null             # e.g. "robot" - null disables wake-word gating
   stop_key: q                 # press this key for an immediate safety stop (TTY only)
-  # Ignore voice for this long after launch so the mic's first noisy moments
-  # (which Whisper tends to hallucinate into words) can't trigger a behavior.
-  startup_grace_s: 1.5
-  # Transcripts that match one of these (lowercased, trailing punctuation
-  # stripped) are dropped before the intent LLM - these are the stock phrases
-  # Whisper emits on silence/noise. Leave unset to use the built-in defaults;
-  # set to [] to disable the phrase filter (the empty/punctuation-only guard
-  # still applies). Add your own room's false positives here.
+  startup_grace_s: 1.5        # ignore the microphone for this long after launch
   #noise_phrases: ["you", "thank you", "bye", "thanks for watching"]
-  vad:                        # NEW: low-latency end-of-utterance detection
-    backend: auto             # auto | webrtc | energy  (auto uses webrtcvad if installed)
-    aggressiveness: 2         # webrtcvad mode 0 (lenient) .. 3 (aggressive)
-    hangover_s: 1.2           # silence that ends an utterance (keeps a short pause inside a command)
-    pre_roll_s: 0.3           # audio kept from before speech onset
-    min_speech_s: 0.25        # reject clicks/coughs shorter than this
-
-whisper:
-  model_type: whisper-base    # whisper-base | whisper-small | whisper-medium | whisper-large-v3-turbo
-  encoder_onnx: models/whisper-base/encoder_model.onnx
-  decoder_onnx: models/whisper-base/decoder_model.onnx
-  device: cpu                 # npu | cpu
-  language: en
-  tokenizer: null
-  encoder_vitisai_config: config/vitisai_config_whisper_encoder.json
-  decoder_vitisai_config: config/vitisai_config_whisper_decoder.json
-  cache_dir: cache
-  cache_key_encoder: whisper_base_encoder
-  cache_key_decoder: whisper_base_decoder
-
-llm:
-  server_bin: third_party/llama.cpp/build/bin/llama-server
-  model_gguf: models/llama-3.2-3b/Llama-3.2-3B-Instruct-Q4_K_M.gguf
-  host: 127.0.0.1
-  port: 8081
-  n_gpu_layers: 99
-  ctx_size: 2048              # MUST stay capped (native 131072 OOMs the iGPU carve-out)
-  grammar_file: config/intent.gbnf
-  autostart: true
-  temperature: 0.0
-  parallel: 1
-  no_warmup: true             # gfx1151 segfaults on the warmup pass
-  # iGPU sharing with the digital twin's renderer (see so101_sim.bench --contention):
-  #ubatch_size: 256           # shorter GPU submissions -> lower render latency
-  #cu_mask: "0:0-31"          # HSA_CU_MASK: fence llama-server to 32 of 40 CUs
-  #hsa_override_gfx_version: "11.5.1"  # Strix Halo
-  hsa_override_gfx_version: "11.5.0"  # Strix Point
-  #hsa_override_gfx_version: "11.0.0"  # workaround for both
 
 yolo_pose:
   onnx: models/yolo26s-pose/yolo26s-pose.onnx

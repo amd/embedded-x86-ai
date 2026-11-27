@@ -8,8 +8,8 @@
 # content has been reviewed and validated by the authors.
 
 # =============================================================================
-# install_kernel.sh - register the repo's .venv as a Jupyter kernel and
-# bring up llama-server (the iGPU brain).
+# install_kernel.sh - register the repo's .venv as a Jupyter kernel.
+# scripts/ensure_voice.sh checks the Gemma 4 files and llama-server the notebooks use.
 #
 # Why this exists: running `jupyter notebook` from inside the venv is not
 # enough. Jupyter (and VS Code, and JupyterLab) launch notebooks with whatever
@@ -26,16 +26,15 @@
 # directly and source nothing - so without baking, the same notebook opened in
 # VS Code loses the NPU and rclpy. Baking makes every launcher behave the same.
 #
-# It also starts llama-server with the exact flags and environment the
-# pipeline itself uses (vla_pipeline/llm/llama_intent.py), reading
-# config/pipeline.yaml - so the notebooks' chat box and IntentRouter find a
-# live model on the iGPU instead of falling back to stubs.
+# scripts/ensure_voice.sh (called below) checks the Gemma 4 files and the
+# built llama-server. Neither script starts the server: a notebook that
+# needs Gemma starts it, and stops it when it closes.
 #
 # Usage:
-#   ./scripts/install_kernel.sh              # kernel + env bake + llama-server
+#   ./scripts/install_kernel.sh              # kernel + env bake + Gemma voice models
 #   ./scripts/install_kernel.sh --force      # reinstall the kernelspec too
-#   ./scripts/install_kernel.sh --no-server  # skip starting llama-server
 #   ./scripts/install_kernel.sh --no-vscode  # don't write .vscode/settings.json
+#   ./scripts/install_kernel.sh --register-only  # this clone's kernel.json only
 #   WITH_ROS_ENV=0 ./scripts/install_kernel.sh   # don't bake ROS 2 into kernel
 # =============================================================================
 set -euo pipefail
@@ -64,6 +63,14 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 say "Using venv python: $PY"
 
+# --register-only rewrites this clone's kernel.json and stops. workshop/run_notebooks.sh
+# calls that on every launch: the kernelspec is per user, so the last clone to
+# start would otherwise leave its venv and NPU paths in the shared file.
+# run_notebooks.sh has already installed ipykernel, ROS 2, and the voice models.
+REGISTER_ONLY=0
+[[ " $* " == *" --register-only "* ]] && REGISTER_ONLY=1
+
+if [[ "$REGISTER_ONLY" -eq 0 ]]; then
 # 2. Make sure ipykernel + ipywidgets live INSIDE the venv.
 #    (uv-created venvs may lack pip; fall back to uv or ensurepip.)
 if ! "$PY" -m pip --version >/dev/null 2>&1; then
@@ -118,6 +125,7 @@ if [ "$MP_RC" -eq 2 ]; then
         say "WARNING: mediapipe still fails after the pin - try: $PY -m pip install --upgrade mediapipe"
     fi
 fi
+fi
 
 # 3. Register the venv as a user kernelspec (idempotent; --force reinstalls).
 if [[ " $* " == *" --force "* ]]; then
@@ -143,6 +151,10 @@ print(KernelSpecManager().get_kernel_spec(sys.argv[1]).resource_dir)
 PYEOF
 )"
 KERNEL_JSON="${KERNEL_DIR}/kernel.json"
+if [[ "$REGISTER_ONLY" -eq 0 ]]; then
+    VENV_DIR="$VENV_DIR" "${REPO_ROOT}/scripts/ensure_ros2_control.sh"
+    VENV_DIR="$VENV_DIR" "${REPO_ROOT}/scripts/ensure_voice.sh"
+fi
 say "Baking runtime env into ${KERNEL_JSON}"
 
 # Capture the env in a subshell that sources the same scripts run_notebooks.sh
@@ -189,6 +201,11 @@ else
     say "    (nothing to bake - ryzen_ai_env.sh / ROS produced no vars)"
 fi
 
+if [[ "$REGISTER_ONLY" -eq 1 ]]; then
+    say "Kernel '${KERNEL_NAME}' registered for this clone: ${KERNEL_JSON}"
+    exit 0
+fi
+
 # 3c. Point VS Code's Python extension at the venv and stop it from filtering
 #     out --user kernelspecs. The named+baked kernel above is what really lets
 #     VS Code find the kernel; this is belt-and-suspenders. --no-vscode skips it.
@@ -221,92 +238,8 @@ print("    wrote %s" % path)
 PYEOF
 fi
 
-# 4. Bring up llama-server (the iGPU brain) unless asked not to.
-#    Mirrors vla_pipeline/llm/llama_intent.py: same flags, same
-#    HSA_OVERRIDE_GFX_VERSION handling, same log file.
-LLM_STATUS="skipped (--no-server)"
-if [[ " $* " != *" --no-server "* ]]; then
-    say "Checking llama-server"
-    # Read the llm: section of config/pipeline.yaml with the venv's python.
-    LLM_ENV="$("$PY" - "$REPO_ROOT" <<'PYEOF'
-import shlex, sys
-from pathlib import Path
-root = Path(sys.argv[1])
-try:
-    import yaml
-    l = yaml.safe_load(open(root / "config" / "pipeline.yaml"))["llm"]
-except Exception as e:
-    print("# config parse failed: %s" % e, file=sys.stderr)
-    sys.exit(1)
-r = lambda p: str(p if Path(p).is_absolute() else root / p)
-print("LLM_BIN=%s" % shlex.quote(r(l["server_bin"])))
-print("LLM_MODEL=%s" % shlex.quote(r(l["model_gguf"])))
-print("LLM_HOST=%s" % shlex.quote(str(l.get("host", "127.0.0.1"))))
-print("LLM_PORT=%s" % shlex.quote(str(l.get("port", 8081))))
-print("LLM_NGL=%s" % shlex.quote(str(l.get("n_gpu_layers", 99))))
-print("LLM_CTX=%s" % shlex.quote(str(l.get("ctx_size", 2048))))
-print("LLM_PAR=%s" % shlex.quote(str(l.get("parallel", 1))))
-print("LLM_NOWARMUP=%s" % shlex.quote("1" if l.get("no_warmup") else ""))
-print("LLM_GFX=%s" % shlex.quote(str(l.get("hsa_override_gfx_version") or "")))
-PYEOF
-)" || die "could not read llm: section of config/pipeline.yaml"
-    eval "$LLM_ENV"
-
-    llm_alive() {
-        "$PY" - "$LLM_HOST" "$LLM_PORT" <<'PYEOF'
-import sys, urllib.request
-try:
-    r = urllib.request.urlopen(
-        "http://%s:%s/health" % (sys.argv[1], sys.argv[2]), timeout=1)
-    sys.exit(0 if r.status == 200 else 1)
-except Exception:
-    sys.exit(1)
-PYEOF
-    }
-
-    if llm_alive; then
-        LLM_STATUS="already running at http://${LLM_HOST}:${LLM_PORT}"
-        say "llama-server ${LLM_STATUS}"
-    elif [ ! -x "$LLM_BIN" ]; then
-        LLM_STATUS="NOT STARTED - ${LLM_BIN} missing (run ./bootstrap.sh, llama.cpp build step)"
-        say "$LLM_STATUS"
-    elif [ ! -f "$LLM_MODEL" ]; then
-        LLM_STATUS="NOT STARTED - ${LLM_MODEL} missing (run ./bootstrap.sh, model download step)"
-        say "$LLM_STATUS"
-    else
-        mkdir -p "${REPO_ROOT}/logs"
-        LLM_LOG="${REPO_ROOT}/logs/llama-server.log"
-        CMD=("$LLM_BIN" --model "$LLM_MODEL" --host "$LLM_HOST" --port "$LLM_PORT"
-             --n-gpu-layers "$LLM_NGL" --ctx-size "$LLM_CTX" --parallel "$LLM_PAR")
-        [ -n "$LLM_NOWARMUP" ] && CMD+=(--no-warmup)
-        # Deterministic GPU init on Strix (see llama_intent.py): present the
-        # iGPU as its nearest supported relative unless already overridden.
-        if [ -n "$LLM_GFX" ] && [ -z "${HSA_OVERRIDE_GFX_VERSION:-}" ]; then
-            export HSA_OVERRIDE_GFX_VERSION="$LLM_GFX"
-        fi
-        say "Starting llama-server on the iGPU (log: ${LLM_LOG})"
-        nohup "${CMD[@]}" >"$LLM_LOG" 2>&1 &
-        LLM_PID=$!
-        disown "$LLM_PID" 2>/dev/null || true
-        deadline=$((SECONDS + 120))
-        while [ $SECONDS -lt $deadline ]; do
-            if llm_alive; then break; fi
-            if ! kill -0 "$LLM_PID" 2>/dev/null; then
-                printf '\033[1;31mllama-server exited during startup. Last log lines:\033[0m\n'
-                tail -n 20 "$LLM_LOG" || true
-                die "see full log: ${LLM_LOG}"
-            fi
-            sleep 0.5
-        done
-        if llm_alive; then
-            LLM_STATUS="running (pid ${LLM_PID}) at http://${LLM_HOST}:${LLM_PORT}"
-            say "llama-server ready - ${LLM_STATUS}"
-        else
-            LLM_STATUS="NOT READY after 120 s - check ${LLM_LOG}"
-            say "$LLM_STATUS"
-        fi
-    fi
-fi
+# Gemma's llama-server is started by the notebook that needs it, not here.
+LLM_STATUS="started by the notebook that needs it (Gemma 4 on the iGPU)"
 
 # 5. Sanity report: does THIS kernel actually see the accelerator stack?
 #    Reflect the same env we baked into kernel.json so the report matches what
@@ -361,7 +294,7 @@ PYEOF
 NPU_CONFIGURED="$("$PY" - "${REPO_ROOT}/config/pipeline.yaml" <<'PYEOF'
 import sys, yaml
 cfg = yaml.safe_load(open(sys.argv[1]))
-sections = ("whisper", "yolo_pose", "yolo_detect")
+sections = ("yolo_pose", "yolo_detect")
 print("1" if any(str(cfg.get(s, {}).get("device", "cpu")).lower() == "npu"
                  for s in sections) else "0")
 PYEOF
@@ -378,7 +311,7 @@ cat <<EOF
 Done.
   kernel       : ${KERNEL_NAME} ("${KERNEL_DISPLAY}")
   kernel.json  : ${KERNEL_JSON}
-  llama-server : ${LLM_STATUS}
+  voice server : ${LLM_STATUS}
 
 In Jupyter (jupyter notebook / lab):
   1. Restart Jupyter:            cd ${REPO_ROOT}/workshop && jupyter notebook
@@ -395,5 +328,6 @@ In VS Code:
   shows "NPU (VitisAI execution provider) [on]" in VS Code too - not only when
   launched via run_notebooks.sh.
 
-To stop the server later:  pkill -f llama-server
+A notebook stops the llama-server it started when it closes its voice session.
+One left behind by a killed kernel:  pkill -f llama-server
 EOF

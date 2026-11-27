@@ -11,8 +11,8 @@
 notebooks in ``01_ai_models``, ``02_ros2`` and ``03_integration``. Here each
 notebook runs top to bottom in a fresh ``vvla-workshop`` kernel, with
 :mod:`notebook_harness`'s stand-ins for the rig's hardware and a scripted
-student for its live cells. YOLO must run on the NPU, and the Llama
-notebooks must get Llama's answers from the iGPU.
+student for its live cells. YOLO must run on the NPU, and the Gemma
+notebooks must get Gemma's answers from the iGPU.
 
 ``cd workshop && ./run_notebooks.sh --test`` runs this after the README's setup.
 """
@@ -27,7 +27,7 @@ import pytest
 from notebook_harness import NOTEBOOKS, PIPE_ROOT, run_notebook
 from twin_ros_rig import join_test_domain
 
-pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.docs, pytest.mark.slow, pytest.mark.timeout(900)]
+pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.docs, pytest.mark.slow, pytest.mark.timeout(180)]
 pytest.importorskip("rclpy")
 pytest.importorskip("nbformat")
 pytest.importorskip("nbclient")
@@ -52,15 +52,12 @@ PATHS = [
 # The student's actions in each live cell (by cell id); any other live cell is
 # watched until it draws three frames (notebook_harness.DEFAULT_ACTIONS).
 SCRIPTS = {
-    "03_igpu_llama": {
-        "07f51d10d595": [("type", "Why do robots like grammars?"), ("wait_for", "llama: ")],
-    },
     "02_robot": {
         "cell-10": [("click", "rest pose")],
     },
     "03_intent_node": {
         "578bb604bee3": [
-            ("type", "stop"), ("wait_for", "stop fast path"),
+            ("type", "stop robot"), ("wait_for", "stop fast path"),
             ("type", "pick up the ball"), ("wait_for", "[LLM parse]"),
         ],
     },
@@ -72,7 +69,6 @@ SCRIPTS = {
 
 # What the notebook's own output must show.
 EXPECT = {
-    "03_igpu_llama": ["llama: "],
     "03_intent_node": ["[LLM parse]", "'pick_place'"],
 }
 
@@ -93,7 +89,27 @@ def test_readme_lists_every_notebook_folder():
 @pytest.mark.parametrize("path", PATHS, ids=lambda p: f"{p.parent.name}/{p.stem}")
 def test_notebook_runs(path: Path):
     join_test_domain()
-    run = run_notebook(path, SCRIPTS.get(path.stem))
+    # 02_robot connects to the real arm launch ./run_pipeline.sh starts.
+    # There is no bus on the test machine, so this is that launch with the
+    # motors off (./run_pipeline.sh --dry-run).
+    launches = None
+    if path.stem == "02_robot":
+        import tempfile
+
+        from twin_ros_rig import assert_domain_free, start_pipeline_launches, stop_pipeline_launches
+
+        assert_domain_free("a twin already runs on the test domain")
+        log = tempfile.NamedTemporaryFile(prefix="robot_notebook_stack_", suffix=".log", delete=False)
+        launches = start_pipeline_launches(
+            log, digital_twin=False, dry_run=True, cameras=False,
+        )
+    try:
+        run = run_notebook(path, SCRIPTS.get(path.stem))
+    finally:
+        if launches is not None:
+            from twin_ros_rig import stop_pipeline_launches
+
+            stop_pipeline_launches(launches)
     yolo = [(model, provider) for model, provider in run.sessions if "yolo" in model.lower()]
     if path.stem in YOLO:
         assert yolo, f"{path.name} made no YOLO session"

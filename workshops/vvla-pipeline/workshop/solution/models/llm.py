@@ -5,7 +5,7 @@
 # Portions of this file consist of AI-generated content. AI-assisted
 # content has been reviewed and validated by the authors.
 
-"""Llama 3.2 3B on the iGPU - the brain, via ``llama.cpp`` + ROCm/HIP.
+"""Gemma 4 E4B on the iGPU - the brain, via ``llama.cpp`` + ROCm/HIP.
 
 The LLM does not run in-process: a ``llama-server`` (built with
 ``-DGGML_HIP=ON``) owns the iGPU and we talk to it over its OpenAI-compatible
@@ -22,7 +22,7 @@ HTTP API. Two things make this path AMD-specific, and both are your TODOs:
    chat completion with the GBNF grammar attached, so the model physically
    cannot emit anything but ``{"command": ..., "object": ...}``.
 
-Notebook: ``notebooks/01_ai_models/03_igpu_llama.ipynb``
+The intent lesson is ``notebooks/02_ros2/03_intent_node.ipynb``.
 Self-test: ``python -m models.selftest`` (uses a mock server - no GPU needed)
 """
 
@@ -45,13 +45,13 @@ logger = logging.getLogger(__name__)
 def llama_server_command(cfg: dict):
     """Build the ``llama-server`` launch: ``(cmd list, env dict)``.
 
-    Reads ``llm:`` from the config. The command must include the model, host,
+    Reads ``gemma4-e4b-it:`` from the config. The command must include the model, host,
     port, ``--n-gpu-layers``, ``--ctx-size``, ``--parallel``, and
     ``--no-warmup`` when configured; the environment must carry
     ``HSA_OVERRIDE_GFX_VERSION`` when the config sets one (don't override a
     value the user already exported).
     """
-    l = cfg["llm"]
+    l = cfg["gemma4-e4b-it"]
     server_bin = resolve(l["server_bin"])
     model = resolve(l["model_gguf"])
     if not server_bin.exists():
@@ -60,7 +60,7 @@ def llama_server_command(cfg: dict):
     if not model.exists():
         raise FileNotFoundError(f"{model} not found - download the GGUF first.")
 
-    # >>> TODO 1.5: llama_server_command - notebooks/01_ai_models/03_igpu_llama.ipynb
+    # >>> TODO 1.5: llama_server_command
     cmd = [
         str(server_bin),
         "--model", str(model),
@@ -70,6 +70,8 @@ def llama_server_command(cfg: dict):
         "--ctx-size", str(l["ctx_size"]),
         "--parallel", str(l.get("parallel", 1)),
     ]
+    if l.get("mmproj"):
+        cmd.extend(["--mmproj", str(resolve(l["mmproj"]))])
     if l.get("no_warmup", False):
         cmd.append("--no-warmup")
 
@@ -103,7 +105,7 @@ def start_llama_server(cfg: dict, ready_timeout_s: float = 120.0,
     logger.info("Starting llama-server (ROCm): %s", " ".join(cmd))
     proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT,
                             env=env)
-    base = f"http://{cfg['llm']['host']}:{cfg['llm']['port']}"
+    base = f"http://{cfg['gemma4-e4b-it']['host']}:{cfg['gemma4-e4b-it']['port']}"
     deadline = time.time() + ready_timeout_s
     while time.time() < deadline:
         if server_alive(base):
@@ -130,7 +132,7 @@ def parse_intent(transcript: str, base_url: str, grammar: str,
     maps to UNKNOWN without any HTTP round trip.
     """
     http = http or requests
-    # >>> TODO 1.6: parse_intent - notebooks/01_ai_models/03_igpu_llama.ipynb
+    # >>> TODO 1.6: parse_intent
     if not transcript or not transcript.strip():
         return ParsedCommand(Intent.UNKNOWN, transcript=transcript or "")
     payload = {
@@ -168,7 +170,7 @@ class LlamaIntentParser:
     """
 
     def __init__(self, cfg: dict, autostart=None):
-        l = cfg["llm"]
+        l = cfg["gemma4-e4b-it"]
         self.base = f"http://{l['host']}:{l['port']}"
         self.temperature = float(l.get("temperature", 0.0))
         self.grammar = resolve(l["grammar_file"]).read_text(encoding="utf-8")

@@ -196,8 +196,8 @@ def test_dance_visits_moves_and_parks(rig, stack, caplog):
 @PIPELINE
 def test_stop_mid_wave(rig, stack):
     """'stop' halts the move within a control tick; the wave never resumes, the arm parks."""
-    rig.run([(0.0, "wave"), (1.6, "stop")])
-    t_stop = rig.transcripts.sent_at("stop")
+    rig.run([(0.0, "wave"), (1.6, "stop robot")])
+    t_stop = rig.transcripts.sent_at("stop robot")
     assert rig.event_times("stop"), "stop fast path not taken"
     assert len(rig.event_times("parsed")) == 1, "stop must not reach the LLM"
 
@@ -544,7 +544,7 @@ def test_mimic_sweep_pinch_roll(rig, stack):
         (11.5, Hand(pinch=0.05, roll=-60.0)),  # ...then the other
         (13.0, Hand(pinch=0.05, roll=-60.0)),
     ]
-    rig.run([(0.0, "copy my movements"), (13.0, "stop")])
+    rig.run([(0.0, "copy my movements"), (13.0, "stop robot")])
 
     tr = rig.trace
     _, pan_a = tr.series("shoulder_pan", 1.5, 2.0, goal=True)
@@ -580,7 +580,7 @@ def test_mimic_hands_a_held_grip_to_the_pinch(rig, stack):
         (3.5, Hand(pinch=0.05)), (6.5, Hand(pinch=0.05)),
         (7.0, Hand(pinch=1.3)), (10.0, Hand(pinch=1.3)),
     ]
-    rig.run([(0.0, _MIMIC[stack]), (10.0, "stop")])
+    rig.run([(0.0, _MIMIC[stack]), (10.0, "stop robot")])
     assert rig.said_any("Your pinch drives the gripper"), rig.said
     assert not rig.ctx.shared_state.get("grip_lock"), "mimic left the grip locked"
     _, opened = rig.trace.series("gripper", 2.0, 3.0)
@@ -605,7 +605,7 @@ def test_mimic_keeps_a_held_ball_until_the_pinch_is_seen(rig, stack):
     rig.pose.keys = [(0.0, [Person(wrist=(0.5, 0.45))]), (10.0, [Person(wrist=(0.5, 0.45))])]
     rig.hands.keys = [(0.0, None), (1.0, None), (1.01, pinched), (10.0, pinched)]
     first = len(rig.trace.samples)  # the trace runs on across runs; the clock restarts
-    rig.run([(0.0, _MIMIC[stack]), (6.0, "stop")])
+    rig.run([(0.0, _MIMIC[stack]), (6.0, "stop robot")])
 
     assert rig.said_any("Your pinch drives the gripper"), rig.said
     goals = [s.goal["gripper"] for s in rig.trace.samples[first:]]
@@ -627,7 +627,7 @@ def test_mimic_hand_lost_then_person_lost(rig, stack):
         (8.0, []),
     ]
     rig.hands.keys = [(0.0, Hand(pinch=1.3)), (1.5, Hand(pinch=1.3)), (1.6, None)]
-    rig.run([(0.0, "mirror my arm"), (8.0, "stop")])
+    rig.run([(0.0, "mirror my arm"), (8.0, "stop robot")])
 
     tr = rig.trace
     _, a = tr.series("shoulder_pan", 1.6, 2.0, goal=True)
@@ -643,7 +643,7 @@ def test_mimic_follows_nearest_person(rig, stack):
     near_left = Person(cx=0.35, scale=1.1, wrist=(0.2, 0.45))
     rig.pose.keys = [(0.0, [far_right, near_left])]
     rig.hands.keys = [(0.0, None)]
-    rig.run([(0.0, "follow me"), (3.5, "stop")])
+    rig.run([(0.0, "follow me"), (3.5, "stop robot")])
     _, pan = rig.trace.series("shoulder_pan", 2.5, 3.4, goal=True)
     # mirrored mapping: a wrist on the LEFT of the image pans the arm positive
     assert pan.mean() > 20.0, f"followed the wrong person (pan {pan.mean():.1f})"

@@ -29,7 +29,7 @@ import pytest
 from notebook_harness import PIPE_ROOT
 from twin_ros_rig import assert_domain_free, join_test_domain, wait_exit
 
-pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.slow, pytest.mark.timeout(600)]
+pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.slow, pytest.mark.timeout(150)]
 pexpect = pytest.importorskip("pexpect")
 popen_spawn = pytest.importorskip("pexpect.popen_spawn")
 pytest.importorskip("rclpy")
@@ -106,7 +106,7 @@ def test_run_pipeline_drives_the_twin(twin_domain, tmp_path):
         child.sendline("dance")
         child.expect(r"=== dance  ===", timeout=BEHAVIOR_S)
         child.expect(r"move_to arrived", timeout=BEHAVIOR_S)
-        child.sendline("stop")
+        child.sendline("stop robot")
         child.expect(PIPELINE_ENDED, timeout=BEHAVIOR_S)
         assert child.match.group(2) == "stopped", f"'stop' left the dance {child.match.group(2)}"
         child.sendeof()
@@ -139,7 +139,7 @@ def test_workshop_app_drives_the_twin(twin_domain, tmp_path):
                  tmp_path / "app.log")
     try:
         app.expect(r"starting gesture mimic", timeout=START_S)
-        app.sendline("stop")
+        app.sendline("stop robot")
         app.expect(r"Mimic stopped after \d+ frames", timeout=BEHAVIOR_S)
         for text in ("dance", "wave", "go home", "drop it", "hold this"):
             app.sendline(text)

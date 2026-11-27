@@ -185,6 +185,24 @@ def test_lockstep_finishes_every_joint_with_the_slowest(world):
     assert max(times) - min(times) <= 0.1 * plan.eta_s + 5 * world.dt, dict(zip(moved, times))
 
 
+def test_wrist_spin_from_a_folded_wrist_arrives(world):
+    """A grasp can leave wrist_flex near 90°. The spin brings it down, and the roll turns."""
+    from common.motion import DANCE_MOVES, clamp_joints
+
+    pose = {
+        "shoulder_pan": 0.0, "shoulder_lift": -55.0, "elbow_flex": 65.0,
+        "wrist_flex": 90.0, "wrist_roll": -75.0, "gripper": 95.0,
+    }
+    for keyframe in DANCE_MOVES["wrist_spin"]:
+        goal = clamp_joints({**pose, **keyframe})
+        _plan, _finished, tripped = _run_planned(world, pose, goal)
+        assert not tripped, tripped
+        here = world.joint_cal()
+        off = {k: round(abs(here[k] - goal[k]), 2) for k in goal if abs(here[k] - goal[k]) > 2.5}
+        assert not off, off
+        pose = goal
+
+
 def test_a_partial_goal_plans_only_its_joints():
     from common.motion import REST_POSE
     from common.servo_profile import shared_profiler

@@ -50,12 +50,12 @@ TODO_INDEX = {
     "1.5": (
         "models/llm.py",
         "llama_server_command",
-        "notebooks/01_ai_models/03_igpu_llama.ipynb",
+        "notebooks/02_ros2/03_intent_node.ipynb",
     ),
     "1.6": (
         "models/llm.py",
         "parse_intent",
-        "notebooks/01_ai_models/03_igpu_llama.ipynb",
+        "notebooks/02_ros2/03_intent_node.ipynb",
     ),
     "2.1": (
         "ros/camera_node.py",

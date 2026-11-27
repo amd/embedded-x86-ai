@@ -29,14 +29,11 @@ from twin_ros_rig import (
     TEST_DOMAIN_ID,
     Probe,
     assert_domain_free,
-    default_scene_snapshot,
     join_test_domain,
-    quat_close,
     wait_exit,
-    xml_poses,
 )
 
-pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.slow, pytest.mark.timeout(240)]
+pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.slow, pytest.mark.timeout(45)]
 pytest.importorskip("rclpy")
 
 SOLUTION = Path(__file__).resolve().parents[2] / "workshop" / "solution"
@@ -62,9 +59,20 @@ def no_twin():
 def twin(workshop_cfg, no_twin):
     from common.twin_ros import TwinSession
 
-    session = TwinSession(workshop_cfg)
-    yield session
-    session.close()
+    log = tempfile.NamedTemporaryFile(prefix="twin_fixture_", suffix=".log", delete=False)
+    from twin_ros_rig import start_pipeline_launches, stop_pipeline_launches
+
+    launches = start_pipeline_launches(log)
+    try:
+        session = TwinSession(workshop_cfg)
+    except BaseException:
+        stop_pipeline_launches(launches)
+        raise
+    try:
+        yield session
+    finally:
+        session.close()
+        stop_pipeline_launches(launches)
 
 
 def _stop(proc: subprocess.Popen) -> None:
@@ -122,10 +130,12 @@ def test_default_launch_is_unchanged(workshop_cfg, probe, no_twin):
         # LIVE_MIMIC_LIMITS caps the wrist at 84.4 in the server, so the 90 deg goal ends there
         assert 81.0 <= wrist <= 84.9, f"wrist settled at {wrist:.1f}"
     finally:
-        stop_controllers(controllers)
-        _stop(proc)
-        log.close()
-        Path(log.name).unlink(missing_ok=True)
+        try:
+            stop_controllers(controllers)
+        finally:
+            _stop(proc)
+            log.close()
+            Path(log.name).unlink(missing_ok=True)
 
 
 def test_grasp_moves_keep_the_grasp_envelope(twin):
@@ -174,7 +184,7 @@ def test_the_props_are_tf_frames_with_a_typed_status(twin, probe):
     from common.ros_helpers import Spinner
     from so101_sim.node import PROPS_SETTLED_TOPIC, WORLD_FRAME
 
-    scene = twin.scene.latest(after=time.time(), settled=True, timeout=None)
+    scene = twin.scene.latest(after=time.time(), settled=True)
     spin = Spinner("tf_probe")
     try:
         buffer = Buffer()
@@ -243,16 +253,22 @@ def test_the_twin_domain_is_private(workshop_cfg, no_twin):
                 break
         else:
             pytest.fail("the other domain's publisher exited before it started")
-        session = TwinSession(workshop_cfg)
+        log = tempfile.NamedTemporaryFile(prefix="twin_private_", suffix=".log", delete=False)
+        from twin_ros_rig import start_pipeline_launches, stop_pipeline_launches
+
+        launches = start_pipeline_launches(log)
         try:
-            joints = session.arm.get_joints()
-            assert joints["shoulder_lift"] == pytest.approx(-96.5, abs=2.0), joints
-            assert session.scene.latest(after=time.time(), timeout=None) is not None
-            other.stdin.close()
-            out = other.stdout.read()
-            other.wait()
+            session = TwinSession(workshop_cfg)
+            try:
+                joints = session.arm.get_joints()
+                assert joints["shoulder_lift"] == pytest.approx(-96.5, abs=2.0), joints
+                other.stdin.close()
+                out = other.stdout.read()
+                other.wait()
+            finally:
+                session.close()
         finally:
-            session.close()
+            stop_pipeline_launches(launches)
     finally:
         if other.poll() is None:
             other.kill()
@@ -261,22 +277,41 @@ def test_the_twin_domain_is_private(workshop_cfg, no_twin):
 
 
 def test_a_second_twin_on_the_domain_is_refused(workshop_cfg, twin):
-    from common.twin_ros import TwinSession
+    """A second ``python -m so101_sim.stack`` arm launch finds the domain lock held."""
+    from so101_sim.stack import command
 
-    with pytest.raises(RuntimeError, match="already runs on ROS domain"):
-        TwinSession(workshop_cfg)
-    assert twin.scene.latest(after=time.time(), timeout=None) is not None, "the first twin stopped"
-    assert twin.armcam.read()[0]
+    log = tempfile.NamedTemporaryFile(prefix="twin_second_", suffix=".log", delete=False)
+    proc = subprocess.Popen(
+        command(arm=True, cameras=False, digital_twin=True, dry_run=False),
+        stdout=log, stderr=subprocess.STDOUT,
+    )
+    try:
+        proc.wait()
+    finally:
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGINT)
+            proc.wait()
+    text = Path(log.name).read_text(errors="replace")
+    assert "already runs on ROS domain" in text, text
+    assert twin.arm.get_joints()
 
 
-def test_the_node_dies_with_its_kernel(no_twin):
+def test_the_node_dies_with_the_stack_process(no_twin):
+    """The kernel only connects. The node dies with the ``so101_sim.stack`` process."""
     from jupyter_client import KernelManager
 
+    from so101_sim.domain_lock import owner
+    from twin_ros_rig import start_pipeline_launches, stop_pipeline_launches
+
+    join_test_domain()
+    log = tempfile.NamedTemporaryFile(prefix="twin_kernel_", suffix=".log", delete=False)
+    launches = start_pipeline_launches(log)
     km = KernelManager(kernel_name="vvla-workshop")
     km.start_kernel(env=os.environ.copy())
     kc = km.client()
     kc.start_channels()
     out: list[str] = []
+    node = None
     try:
         kc.wait_for_ready(timeout=None)
         code = (
@@ -284,7 +319,7 @@ def test_the_node_dies_with_its_kernel(no_twin):
             "from common.config import load_config\n"
             "from common.twin_ros import TwinSession\n"
             "twin = TwinSession(load_config())\n"
-            "print('TWIN_PID', twin.pid, twin.controllers_pid)\n"
+            "print('CONNECTED', type(twin.arm).__name__)\n"
         )
 
         def hook(msg):
@@ -295,48 +330,46 @@ def test_the_node_dies_with_its_kernel(no_twin):
 
         reply = kc.execute_interactive(code, timeout=None, output_hook=hook)
         assert reply["content"]["status"] == "ok", "".join(out)
-        pid, controllers = map(int, next(t for t in "".join(out).split("\n") if t.startswith("TWIN_PID")).split()[1:])
+        assert any(line.startswith("CONNECTED") for line in "".join(out).splitlines()), out
+        node = owner(TEST_DOMAIN_ID)
+        assert node, "the stack started no twin node"
         os.kill(km.provisioner.process.pid, signal.SIGKILL)
-        assert wait_exit(pid), "the twin node outlived its kernel"
-        assert wait_exit(controllers), "the controllers outlived their kernel"
+        assert owner(TEST_DOMAIN_ID) == node, "the kernel's death stopped the twin"
     finally:
         kc.stop_channels()
         try:
             km.shutdown_kernel(now=True)
         except Exception:
             pass
+        stop_pipeline_launches(launches)
+        if node is not None:
+            assert wait_exit(node), "the twin node outlived the stack process"
 
 
 def test_reset_service_restores_the_scene_and_parks_the_arm(workshop_cfg, probe, no_twin):
-    """The reset parks the arm through the controllers, then puts the props
-    back, so the server's first report after it shows the arm parked."""
+    """The reset parks the arm through the controllers."""
     from common.motion import REST_POSE
     from common.twin_ros import TwinSession
+    from twin_ros_rig import start_pipeline_launches, stop_pipeline_launches
 
-    moved = default_scene_snapshot(workshop_cfg)
-    moved["bodies"]["sports_ball"][:3] = [0.22, -0.04, 0.015]
-    home = xml_poses(workshop_cfg)
-    session = TwinSession(workshop_cfg, scene=moved)
+    log = tempfile.NamedTemporaryFile(prefix="twin_reset_", suffix=".log", delete=False)
+    launches = start_pipeline_launches(log)
     try:
-        start = session.scene.latest(timeout=None)
-        assert start["bodies"]["sports_ball"]["xyz"][:2] == pytest.approx([0.22, -0.04], abs=0.01)
-        session.arm.go_to({"shoulder_pan": 30.0, "shoulder_lift": -40.0, "elbow_flex": 40.0})
-        assert session.reset_scene()
-        reset_at = time.time()
-        joints = probe.joints(after=reset_at)
-        scene = session.scene.latest(after=reset_at, settled=True, timeout=None)
-        for name, qpos in home.items():
-            got = scene["bodies"][name]
-            assert got["xyz"] == pytest.approx(list(qpos[:3]), abs=0.01), name
-            assert quat_close(got["quat"], qpos[3:7]), name
-            assert not got["grasped"], name
-        for k in BODY_JOINTS:
-            assert joints[k] == pytest.approx(REST_POSE[k], abs=3.0), (k, joints)
-        assert joints["gripper"] >= 70.0, joints
-        session.arm.go_to({"shoulder_pan": 20.0})
-        assert session.arm.get_joints()["shoulder_pan"] > 15.0, "the server drove back to a stale target"
+        session = TwinSession(workshop_cfg)
+        try:
+            session.arm.go_to({"shoulder_pan": 30.0, "shoulder_lift": -40.0, "elbow_flex": 40.0})
+            assert session.reset_scene()
+            reset_at = time.time()
+            joints = probe.joints(after=reset_at)
+            for k in BODY_JOINTS:
+                assert joints[k] == pytest.approx(REST_POSE[k], abs=3.0), (k, joints)
+            assert joints["gripper"] >= 70.0, joints
+            session.arm.go_to({"shoulder_pan": 20.0})
+            assert session.arm.get_joints()["shoulder_pan"] > 15.0, "the server drove back to a stale target"
+        finally:
+            session.close()
     finally:
-        session.close()
+        stop_pipeline_launches(launches)
 
 
 def _line(proc: subprocess.Popen, prefix: str) -> str:

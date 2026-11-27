@@ -426,6 +426,8 @@ class Ros2ArmClient(ControllerArm):
 
 def _run_server(cfg: dict, dry_run: bool, ros_args: list[str]) -> None:
     """Spin up rclpy, run So101ServerNode until interrupted, and shut down cleanly."""
+    from so101_sim.spin import spin_until_shutdown
+
     rclpy.init(args=ros_args)
     node = So101ServerNode(cfg, dry_run=dry_run)
     # One thread: the callbacks are short (the bus has its own thread), and
@@ -434,9 +436,10 @@ def _run_server(cfg: dict, dry_run: bool, ros_args: list[str]) -> None:
     executor = SingleThreadedExecutor()
     executor.add_node(node)
     try:
-        executor.spin()
-    except KeyboardInterrupt:
-        node.get_logger().info("Shutting down (keyboard interrupt)...")
+        # Same stop as the camera node. rclpy turns SIGINT into
+        # ExternalShutdownException; letting it escape exits 1, and the launch
+        # reports the server as crashed instead of stopped.
+        spin_until_shutdown(executor)
     finally:
         node.destroy_node()
         try:

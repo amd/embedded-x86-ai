@@ -610,12 +610,12 @@ class PipelineRig(_Rig):
         from vla_pipeline.vision.yolo_detect_npu import Detection, resolve_class
 
         host, port = _llm_host_port(llm_base)
-        self.cfg["llm"].update(host=host, port=port, autostart=False)
+        self.cfg["gemma4-e4b-it"].update(host=host, port=port, autostart=False)
         self.cfg["robot"]["backend"] = "sim"
         self.arm = arm if arm is not None else SimArmClient(self.cfg, world=self.world)
         self._eyes(detector, Detection, resolve_class)
         self.arm_camera = arm_camera if arm_camera is not None else self.seg_camera
-        self.parser = LlamaIntentParser(self.cfg)
+        self.parser = LlamaIntentParser(self.cfg, section="gemma4-e4b-it")
         self._closers.append(self.parser.close)
         self.ctx = PipelineContext(
             cfg=self.cfg, arm=self.arm, pose=self.pose, detector=self.detector, hands=self.hands,
@@ -681,7 +681,7 @@ class WorkshopRig(_Rig):
         from models.llm import LlamaIntentParser
 
         host, port = _llm_host_port(llm_base)
-        self.cfg["llm"].update(host=host, port=port, autostart=False)
+        self.cfg["gemma4-e4b-it"].update(host=host, port=port, autostart=False)
         self.cfg["robot"]["backend"] = "sim"
         self.arm = arm if arm is not None else SimArmClient(self.cfg, world=self.world)
         self._eyes(detector, Detection, resolve_class)

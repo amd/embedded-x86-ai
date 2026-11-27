@@ -1,8 +1,11 @@
-# Grammar for the intent router: the model can ONLY emit
-#   {"command": "<one of the known commands>", "object": "<0-2 plain words>"}
+# Grammar for the intent router: the model can ONLY emit a JSON list of three strings,
+#   ["<one of the known commands>", "<object: 0-2 plain words>", "<the words heard>"]
 # so JSON parsing can never fail and unknown verbs collapse to "unknown".
+# The third is what the speaker said, so the console can show it. The command and the object
+# come first: they are acted on while the words are still being written.
+# A list and not an object with named keys: fewer tokens before the call is complete.
 
-root    ::= "{" ws "\"command\"" ws ":" ws cmd ws "," ws "\"object\"" ws ":" ws obj ws "}"
+root    ::= "[" ws cmd ws "," ws obj ws "," ws said ws "]"
 
 cmd     ::= "\"gesture_mimic\"" | "\"fetch_block\"" | "\"pick_place\"" |
             "\"dance\"" | "\"grip\"" | "\"release\"" | "\"wave\"" | "\"home\"" |
@@ -11,5 +14,11 @@ cmd     ::= "\"gesture_mimic\"" | "\"fetch_block\"" | "\"pick_place\"" |
 # Object: empty, or 1-2 lowercase words ("ball", "water bottle").
 obj     ::= "\"\"" | "\"" word (" " word)? "\""
 word    ::= [a-z] [a-z]{0,15}
+
+# What was said. Empty when the words cannot be made out.
+# The rule is not named heard_*: the grammar lexer splits that into the
+# "heard" key plus leftover text, and a quote inside [^"] ends the string.
+said  ::= "\"" hchar* "\""
+hchar ::= [a-zA-Z0-9] | "'" | "," | "." | "?" | "!" | "-" | " "
 
 ws      ::= [ \t]*

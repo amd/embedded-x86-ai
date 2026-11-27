@@ -5,7 +5,7 @@
 # Portions of this file consist of AI-generated content. AI-assisted
 # content has been reviewed and validated by the authors.
 
-"""``02_digital_twin.ipynb`` section 5, driven the way JupyterLab drives it.
+"""``02_digital_twin.ipynb`` section 4, driven the way JupyterLab drives it.
 
 The module starts one ``vvla-workshop`` kernel and runs the notebook through
 ``c0000014`` once. Each test runs only the console cell (``c0000016``): its
@@ -23,8 +23,8 @@ twin taken by this process, and the kernel namespace once the session ends.
 
 The in-memory copy of the notebook starts with ``RIG_STANDINS``
 (:mod:`notebook_harness`): a generated frame is the webcam, pose comes from
-``ScriptedPose``, and there is no microphone. Whisper, Llama on the iGPU
-and the YOLO sessions on the NPU are real. Arm-camera detection still runs
+``ScriptedPose``, and there is no microphone. Gemma 4 on the iGPU (a
+llama-server of the kernel's own) and the YOLO sessions on the NPU are real. Arm-camera detection still runs
 the detector. The file on disk is not changed.
 
 ``cd workshop && ./run_notebooks.sh --test``
@@ -41,6 +41,7 @@ import logging
 import os
 import re
 import signal
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -51,6 +52,7 @@ from notebook_harness import (
     NOTEBOOKS,
     PIPE_ROOT,
     Console,
+    SpokenInput,
     Watcher,
     cell_index,
     cell_stdout,
@@ -67,11 +69,10 @@ from twin_ros_rig import (
     process_gone,
     quat_close,
     twin_log_report,
-    wait_exit,
     xml_poses,
 )
 
-pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.docs, pytest.mark.slow, pytest.mark.timeout(900)]
+pytestmark = [pytest.mark.sim, pytest.mark.hw, pytest.mark.docs, pytest.mark.slow, pytest.mark.timeout(120)]
 pytest.importorskip("rclpy")
 nbformat = pytest.importorskip("nbformat")
 pytest.importorskip("nbclient")
@@ -84,16 +85,23 @@ NOTEBOOK = NOTEBOOKS / "03_integration" / "02_digital_twin.ipynb"
 SESSION_ENDED = "session ended, arm parked"  # the console cell's last line
 
 NAMESPACE = '''\
-import json as _json
+import json as _json, os
+from so101_sim.domain_lock import owner
 print("NS " + _json.dumps({
     "trace": voice.trace,
     "dispatcher_alive": dispatcher.is_alive(),
     "log": [line for line, _color in console._log],
-    "pid": twin.pid,
-    "twin_log": str(twin.log_path),
+    "pid": owner(int(os.environ.get("ROS_DOMAIN_ID", "0"))),
     "sessions": _SESSIONS,
+    "gemma_port": voice.llm.port,
+    "microphone": voice.mic.error,
 }))
 '''
+# What the kernel's speech front end reports for its microphone (notebook_harness.RIG_STANDINS).
+NO_MICROPHONE = "no microphone in the notebook test"
+# With a microphone, the notebook's voice.listen() prints this and waits for one spoken command.
+LISTEN_ASKS = "Say a command"
+LISTEN_SENTENCE = "pick up the ball"
 
 # The notebook keeps INFO out of its cells (root at WARNING). This leaves the
 # cells as they are and sends the workshop's INFO, and every warning, to a file.
@@ -112,7 +120,7 @@ for _name in ("common", "integration", "models", "ros", "so101_sim", "vla_pipeli
     _logging.getLogger(_name).setLevel(_logging.INFO)
 import faulthandler as _faulthandler, signal as _signal
 _faulthandler.register(_signal.SIGUSR1, file=_fh.stream, all_threads=True)  # the test's thread dump
-print("KERNEL_LOG", getattr(globals().get("twin"), "log_path", ""))
+print("KERNEL_LOG", "")
 '''
 
 # voice.reset_scene() returns None. It clears ctx.stop_event, which the console cell's finally leaves set.
@@ -150,7 +158,8 @@ class NotebookKernel:
     lives on one thread and every scenario is submitted onto it.
     """
 
-    def __init__(self):
+    def __init__(self, spoken: SpokenInput | None = None):
+        self.spoken = spoken  # what a test says to this kernel; None: the kernel has no microphone
         self.watcher: Watcher | None = None
         self.needs_new_kernel = False
         self.last_pid: int | None = None
@@ -225,10 +234,18 @@ class NotebookKernel:
         self._serve_task = asyncio.current_task()
         self._down.clear()
         try:
-            async with self.client.async_setup_kernel(env=kernel_env()):
+            env = kernel_env() | (self.spoken.env() if self.spoken else {})
+            async with self.client.async_setup_kernel(env=env):
                 self.watcher = Watcher(self.client.km.get_connection_info())
                 try:
-                    await self._through("c0000014")
+                    # With a microphone, cell c0000014 asks for one spoken command and waits for it.
+                    asked = asyncio.create_task(self._answer_listen()) if self.spoken else None
+                    try:
+                        await self._through("c0000014")
+                    finally:
+                        if asked is not None:
+                            asked.cancel()  # no effect once it has spoken
+                            await asyncio.gather(asked, return_exceptions=True)
                     await self._log_to_file()
                     self._open.set()
                     self._opened.set()
@@ -239,6 +256,12 @@ class NotebookKernel:
                         self.watcher = None
         finally:
             self._down.set()
+
+    async def _answer_listen(self) -> None:
+        """Say one command when the notebook's ``voice.listen()`` asks for it."""
+        await until(lambda: self.watcher.said(LISTEN_ASKS), "the notebook asking for a spoken command",
+                    self.watcher)
+        await asyncio.to_thread(self.spoken.say, LISTEN_SENTENCE)
 
     async def _restart(self) -> None:
         """SIGINT during mimic wedges the NPU session, and the rerun test closes the stack.
@@ -280,6 +303,18 @@ class NotebookKernel:
         line = next(t for t in reversed(text.splitlines()) if t.startswith("NS "))
         namespace = json.loads(line[3:])
         self.twin_log = namespace.get("twin_log") or self.twin_log
+        # The kernel hears nothing of the room and asks a Gemma of its own. With the real
+        # microphone and the configured port it took a sentence spoken to a notebook open on
+        # the same machine for its own command, and stopped the llama-server that notebook
+        # was using when it closed (2026-11-25). A kernel a test speaks to has the stand-in
+        # microphone, which opens without an error.
+        expected = None if self.spoken else NO_MICROPHONE
+        assert namespace["microphone"] == expected, (
+            f"the notebook kernel's microphone reports {namespace['microphone']!r}, not {expected!r}")
+        from vla_pipeline.utils.config import load_config
+
+        assert namespace["gemma_port"] != load_config()["gemma4-e4b-it"]["port"], (
+            "the notebook kernel asks Gemma on the configured port, which a notebook open on this machine uses")
         return namespace
 
     def failure_report(self, dest: Path, since: float | None) -> str:
@@ -410,8 +445,9 @@ class NotebookKernel:
         assert not fallback, f"02_digital_twin fell back to the CPU: {fallback}"
         if self.last_pid is not None and not process_gone(self.last_pid):
             # A second hands.close() raises, so skip this when a scenario already ran c0000018.
+            # The cleanup cell closes clients. run_notebooks.sh owns the stack process.
             await self.client.async_execute_cell(self.nb.cells[self.cleanup], self.cleanup)
-            assert await asyncio.to_thread(wait_exit, self.last_pid), "the cleanup cell left the twin node running"
+            assert not process_gone(self.last_pid), "the cleanup cell stopped the twin launch"
 
 
 @pytest.fixture(scope="module")
@@ -428,14 +464,27 @@ def observers(workshop_cfg):
 
 @pytest.fixture(scope="module")
 def kernel(observers):
+    yield from notebook_kernel()
+
+
+def notebook_kernel(spoken: SpokenInput | None = None):
+    """A fixture's body: the pipeline's twin launches and one notebook kernel on them, run
+    through cell c0000014; closed and checked afterwards. ``spoken``: what a test says to it."""
+    from twin_ros_rig import start_pipeline_launches, stop_pipeline_launches
+
     assert_domain_free("a twin already runs on the test domain")
-    session = NotebookKernel()
-    session.start()
+    log = tempfile.NamedTemporaryFile(prefix="notebook_stack_", suffix=".log", delete=False)
+    launches = start_pipeline_launches(log)
+    session = NotebookKernel(spoken)
     try:
-        yield session
+        session.start()
+        try:
+            yield session
+        finally:
+            session.finish()
     finally:
-        session.finish()
-    assert_domain_free("the notebook's twin node outlived its cleanup cell", wait=True)
+        stop_pipeline_launches(launches)
+    assert_domain_free("the notebook's twin node outlived the stack process", wait=True)
 
 
 @pytest.mark.parametrize(
@@ -455,7 +504,7 @@ def test_console_pickup(observers, kernel, text, body, spoken):
         console.type(text)
         record = await console.record(text)
         seen["record"] = record
-        seen["reading"] = await asyncio.to_thread(scene.reading, body, after=time.time(), timeout=None)
+        seen["reading"] = await asyncio.to_thread(scene.reading, body, after=time.time())
         await until(lambda: console.said(f"Got the {spoken}"), f"'Got the {spoken}'", console.watcher)
 
     namespace = kernel.run(script)
@@ -483,7 +532,7 @@ def test_console_reset(observers, kernel, workshop_cfg):
         assert first["grasped"], first
         console.type("drop it")
         seen["drop"] = await console.record("drop it")
-        seen["dropped"] = await asyncio.to_thread(scene.reading, "toothbrush", after=time.time(), timeout=None)
+        seen["dropped"] = await asyncio.to_thread(scene.reading, "toothbrush", after=time.time())
         seen["jaw"] = (await asyncio.to_thread(probe.joints, after=time.time()))["gripper"]
         console.click("reset")
         await until(lambda: console.said(RESET_LINE), "the reset line", console.watcher)
@@ -491,7 +540,7 @@ def test_console_reset(observers, kernel, workshop_cfg):
         # back, before the console said so: the server's next report shows it parked.
         said_at = time.time()
         seen["parked"] = await asyncio.to_thread(probe.joints, after=said_at)
-        seen["scene"] = await asyncio.to_thread(scene.latest, after=said_at, timeout=None, settled=True)
+        seen["scene"] = await asyncio.to_thread(scene.latest, after=said_at, settled=True)
         again = console.watcher.mark()
         console.type("pick up the toothbrush")
         seen["again"] = await console.record("pick up the toothbrush", since=again)
@@ -589,12 +638,12 @@ def test_console_run_and_advance(observers, kernel):
     namespace = kernel.run(script, end_with="rerun", after=after)
     assert seen["parked"] == 1, "the console cell ran a second session"
     _assert_dispatcher_dead(namespace)
-    assert wait_exit(namespace["pid"]), "the cleanup cell left the twin node running"
+    assert namespace["pid"] and not process_gone(namespace["pid"]), "the cleanup cell stopped the twin launch"
 
 
 def test_console_stop(observers, kernel):
     """The red stop button ends the console cell: the in-flight pickup is not a grasp
-    and the arm parks. Saying "stop" only halts the behavior. The module teardown closes the twin."""
+    and the arm parks. Saying "stop robot" only halts the behavior. The module teardown closes the twin."""
     from common.motion import REST_POSE
 
     probe, _scene = observers

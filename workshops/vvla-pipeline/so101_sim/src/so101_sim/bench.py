@@ -119,13 +119,13 @@ def _llm_request(base: str, prompt: str) -> float:
 
 
 def bench_contention(cfg: dict | None, n: int = 12) -> dict:
-    llm = (cfg or {}).get("llm") or {}
-    base = f"http://{llm.get('host', '127.0.0.1')}:{llm.get('port', 8081)}"
+    llm = (cfg or {}).get("gemma4-e4b-it") or {}
+    base = f"http://{llm.get('host', '127.0.0.1')}:{llm.get('port', 8082)}"
     try:
         urllib.request.urlopen(f"{base}/health", timeout=2).read()
     except Exception as e:
         return {"error": f"llama-server not reachable at {base} ({e}); start it first "
-                "(the pipeline autostarts it, or workshop/start_llama_server.sh)"}
+                "(the pipeline autostarts Gemma through scripts/ensure_voice.sh)"}
     prompt = ("You map robot voice commands to JSON intents.\nCommand: pick up the red ball\nJSON:")
     _llm_request(base, prompt)  # warm the prompt cache
     alone = [_llm_request(base, prompt) for _ in range(n)]

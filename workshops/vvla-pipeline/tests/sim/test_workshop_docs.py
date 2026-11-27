@@ -29,7 +29,7 @@ import pytest
 from notebook_harness import PIPE_ROOT
 from twin_ros_rig import join_test_domain
 
-pytestmark = [pytest.mark.sim, pytest.mark.docs, pytest.mark.timeout(600)]
+pytestmark = [pytest.mark.sim, pytest.mark.docs, pytest.mark.timeout(40)]
 
 WORKSHOP = PIPE_ROOT / "workshop"
 README = WORKSHOP / "README.md"

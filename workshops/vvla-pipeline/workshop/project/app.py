@@ -36,8 +36,8 @@ publishers) as child processes and tears them down on exit - so you don't need
 a terminal per node. Pass --no-nodes if you start them yourself.
 
 While the UI runs, type commands into the terminal ("dance", "wave",
-"go home", "copy my movements", "stop") - they run through YOUR
-handle_transcript gauntlet, parsed by Llama on the iGPU (or the keyword
+"go home", "copy my movements", "stop robot") - they run through YOUR
+handle_transcript gauntlet, parsed by Gemma 4 on the iGPU (or the keyword
 stand-in only under --no-llm).
 """
 
@@ -273,7 +273,7 @@ def _build_parser(cfg, args):
             "Check the GGUF model and llama.cpp build (HSA_OVERRIDE_GFX_VERSION "
             "for the iGPU); pass --no-llm for keyword routing.",
         )
-    print("brain: Llama 3.2 3B on the iGPU (grammar-constrained)")
+    print("brain: Gemma 4 E4B on the iGPU (grammar-constrained)")
     return parser.parse
 
 
@@ -499,7 +499,7 @@ def main() -> int:
         """Always-hot input thread (mirrors the pipeline's listener).
 
         Behaviors run on the MAIN thread (cv2 previews want that), so while
-        one is running the dispatch loop below is blocked - a typed 'stop'
+        one is running the dispatch loop below is blocked - a typed 'stop robot'
         must therefore interrupt from HERE, with ctx.request_stop(): it sets
         the stop event every behavior's stop_check polls, and a command whose
         parse is still running does not start. Everything else is queued for
@@ -529,7 +529,7 @@ def main() -> int:
 
     print("\n-- live UI --")
     print(
-        "type: 'dance', 'wave', 'go home', 'copy my movements', 'stop', "
+        "type: 'dance', 'wave', 'go home', 'copy my movements', 'stop robot', "
         "'quit'   ('q' in the window also stops a behavior)"
     )
     print("starting gesture mimic...\n")

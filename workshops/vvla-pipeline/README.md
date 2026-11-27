@@ -1,10 +1,10 @@
 # Strix VVLA Pipeline
 Voice-Vision-Language-Action
-Whisper-Yolov26-Llama3.2-ROS2
+Gemma4-Yolov26-ROS2
 
 Voice-controlled robot behaviors for the **LeRobot SO-101** arm on an **AMD Ryzen AI APU (Strix Point / Strix Halo, gfx1150 / gfx1151 / gfx1100 for compatibility)** — speech, language, and vision all running locally, split across the NPU, iGPU, and CPU.
 
-The robot has senses: **Whisper is its ears**, **YOLO is its eyes**, **Llama is its brain**, and the **feedback gripper is its sense of touch**. You speak; it hears, understands, looks, and acts.
+The robot has senses: **Gemma 4 is its ears and its brain**, **YOLO is its eyes**, and the **feedback gripper is its sense of touch**. You speak; it hears, understands, looks, and acts.
 
 
 ## Pipeline architecture
@@ -16,16 +16,16 @@ flowchart TB
         MOUNTCAM([Mount camera<br/>faces human]):::io
         ARMCAM([Arm camera<br/>end effector]):::io
 
-        VAD["VAD listener thread<br/>1.2 s end-of-speech<br/>(always hot)"]:::cpu
-        WHISPER["Whisper-base<br/>speech → text<br/>(CPU)"]:::cpu
+        SILERO["Silero VAD<br/>20 ms frames<br/>(CPU)"]:::cpu
+        HOP["Utterance<br/>sent when the speaker falls silent"]:::cpu
         POSE["YOLOv26s-pose<br/>17 body keypoints"]:::npu
         DETECT["YOLOv26s-detect<br/>80-class objects"]:::npu
         HANDS["MediaPipe Hands<br/>thumb/index pinch"]:::cpu
     end
 
     subgraph THINK["Language &amp; routing"]
-        STOPCHK{{"STOP keyword?<br/>(raw transcript)"}}:::gate
-        LLAMA["Llama 3.2 3B + GBNF<br/>{command, object}"]:::gpu
+        GEMMA["Gemma 4 E4B<br/>speech and intent<br/>(iGPU, GBNF)"]:::gpu
+        STOPCHK{{"stop robot?<br/>(Gemma's stop command)"}}:::gate
         REG["CommandRegistry<br/>dispatch (main thread)"]:::cpu
     end
 
@@ -46,8 +46,8 @@ flowchart TB
 
     STOPEVENT["stop_event<br/>(polled every tick)"]:::gate
 
-    MIC --> VAD --> WHISPER --> STOPCHK
-    STOPCHK -- "no" --> LLAMA --> REG
+    MIC --> SILERO --> HOP --> GEMMA --> STOPCHK
+    STOPCHK -- "no" --> REG
     STOPCHK -- "yes" --> STOPEVENT
 
     MOUNTCAM --> POSE
@@ -82,7 +82,7 @@ flowchart TB
     classDef gate fill:#f5f5f5,stroke:#666,color:#000;
 ```
 
-Legend — <span title="NPU">🟧 NPU (VitisAI EP)</span> · 🟦 iGPU (ROCm) · 🟪 CPU · 🟩 behavior · 🟥 robot/transport. YOLO-pose and YOLO-detect target the NPU by default; Whisper defaults to CPU, where a short command transcribes in a few hundred ms. See [Compute placement → NPU load order](#npu-load-order-important).
+Legend — <span title="NPU">🟧 NPU (VitisAI EP)</span> · 🟦 iGPU (ROCm) · 🟪 CPU · 🟩 behavior · 🟥 robot/transport. YOLO-pose and YOLO-detect run on the NPU. Silero runs on the CPU. Gemma 4 E4B runs on the iGPU. See [Compute placement → NPU load order](#npu-load-order-important).
 
 ## The robot's senses → an SO-101
 
@@ -100,12 +100,12 @@ flowchart LR
         BASE --- SHOULDER --- ELBOW --- WRIST --- JAW
     end
 
-    EARS["👂 EARS<br/><b>Whisper-base · CPU</b><br/>speech → text"]:::ear
-    BRAIN["🧠 BRAIN<br/><b>Llama 3.2 3B · iGPU</b><br/>intent + object<br/>(GBNF-constrained)"]:::brain
+    EARS["👂 EARS<br/><b>Silero · CPU</b><br/>which frames are speech"]:::ear
+    BRAIN["🧠 BRAIN<br/><b>Gemma 4 E4B · iGPU</b><br/>speech and intent<br/>(one utterance, GBNF)"]:::brain
     EYES["👁 EYES<br/><b>YOLOv26s · NPU</b><br/>pose = where you are<br/>detect = what to grab"]:::eye
     TOUCH["✋ TOUCH<br/><b>Feedback gripper</b><br/>current + position stall<br/>+ camera verify"]:::touch
 
-    EARS ==>|"what you said"| BRAIN
+    EARS ==>|"an utterance<br/>the moment you fall silent"| BRAIN
     BRAIN ==>|"which behavior"| BODY
     EYES ==>|"stop at the first<br/>usable view"| BASE
     EYES ==>|"IK reach to the located object<br/>(shoulder/elbow/wrist)"| ELBOW
@@ -118,23 +118,23 @@ flowchart LR
     classDef touch fill:#f8cecc,stroke:#b85450,color:#000,font-size:14px;
 ```
 
-**Ears (Whisper) → Brain (Llama):** the microphone is gated by an always-hot VAD listener; Whisper turns speech to text on the CPU, and Llama — constrained by a GBNF grammar so it can only emit `{"command", "object"}` — decides which behavior to run. **Eyes (YOLO) → the arm's aim and reach:** YOLO-pose finds *where you are* (drives `shoulder_pan` and the up/down reach for mimicry and handoff), while YOLO-detect finds *what to grab* (grounds "the ball" on a settled sweep, and one stored frame — the camera ray through the box's bottom meeting the table — gives the object's position for one IK reach). **Touch (gripper) → the jaws:** the feedback close loop senses contact through servo current and position stall, confirms with the arm camera, and keeps the goal a little past contact at `Torque_Limit` 500 while both fingers seat, then eases to `hold_torque_limit` for the carry — which is why a pen no longer slips.
+**Ears (Silero) → Brain (Gemma 4):** Silero on the CPU marks the 20 ms frames that are speech. They are collected into an utterance, which goes to Gemma 4 E4B on the iGPU the moment the person has been silent for 0.3 s. The grammar lets Gemma emit only the list `["<command>", "<object>", "<words heard>"]`, and the command is acted on as soon as Gemma has written it, before the words. **Eyes (YOLO) → the arm's aim and reach:** YOLO-pose finds *where you are* (drives `shoulder_pan` and the up/down reach for mimicry and handoff), while YOLO-detect finds *what to grab* (grounds "the ball" on a settled sweep, and one stored frame — the camera ray through the box's bottom meeting the table — gives the object's position for one IK reach). **Touch (gripper) → the jaws:** the feedback close loop senses contact through servo current and position stall, confirms with the arm camera, and keeps the goal a little past contact at `Torque_Limit` 500 while both fingers seat, then eases to `hold_torque_limit` for the carry — which is why a pen no longer slips.
 
 ## Voice commands → behaviors
 
-Llama is constrained by `config/intent.gbnf` so it can only ever emit `{"command": "<intent>", "object": "<words>"}` — no parse failures.
+Gemma 4 is constrained by `config/intent.gbnf` so it can only emit the list `["<intent>", "<object words>", "<words heard>"]`. A spoken "stop robot" is Gemma's `stop` command; a typed one is matched as a keyword before Gemma is asked. Either interrupts the running behavior. "stop" alone is not a command.
 
 | Say something like | Intent | What happens |
 |---|---|---|
 | "mirror my arm", "copy my movements" | `gesture_mimic` | YOLO-pose tracks your wrist; a direct camera-frame mapping drives the arm joints to follow your hand (depth from MediaPipe hand size). MediaPipe tracks your thumb–index pinch → gripper. |
 | "pick up the ball", "grab the bottle and give it to me" | `pick_place` | YOLO-detect grounds the named object on the arm camera → stop at the first usable view → one table locate → one grasp solve → joint-space descent → feedback grasp → lift it above the other objects and hold it out. The jaws stay closed. |
-| "release", "open", "drop it" | `release` | Llama maps the phrase to `release`. The jaws open where they are and the arm stays put, so the object can be taken or dropped. |
+| "release", "open", "drop it" | `release` | Gemma maps the phrase to `release`. The jaws open where they are and the arm stays put, so the object can be taken or dropped. |
 | "fetch the block", "bring me the cube" | `fetch_block` | Approach the block at its taught pose → grasp → lift → find you (YOLO-pose) → extend → release → home. |
 | "hold this", "take this pencil" | `grip` | Closes until contact (current/stall + grace window), confirms with the arm camera, then **locks the grip** until "release". A following `gesture_mimic` hands the gripper to your pinch, so the object drops when you open your fingers. |
 | "dance", "show me some moves" | `dance` | BPM-paced keyframe choreography. |
 | "wave at me", "say hi" | `wave` | Raises the arm and waves `behaviors.wave.cycles` times. |
-| "go home", "reset position" | `home` | Returns to the rest pose. |
-| "stop", "halt", "freeze" | `stop` | **Keyword-matched on the raw transcript — bypasses the LLM** and interrupts any running behavior immediately. |
+| "go home" | `home` | Returns to the rest pose. "home" or "reset" alone is not a command. |
+| "stop robot" | `stop` | **Interrupts any running behavior immediately.** Spoken, it is Gemma's `stop` command; typed, it is matched as a keyword before Gemma is asked. "stop" alone is not a command. |
 
 ## Tested environment
 
@@ -144,10 +144,14 @@ Llama is constrained by `config/intent.gbnf` so it can only ever emit `{"command
 | OS | Ubuntu 24.04 |
 | ROCm | 7.2.4 |
 | Ryzen AI SW | 1.7.1 (VitisAI ONNX Runtime EP) |
+| llama.cpp | build 12720 (commit `33aeb17`), built with HIP; Gemma 4 audio needs commit `547765a` or newer |
+| Voice model | Gemma 4 E4B-IT, Q4_0 GGUF, with its Q8_0 audio projector (`ggml-org/gemma-4-E4B-it-GGUF`) |
 | ROS 2 | Jazzy (required), with ros2_control and the controllers |
-| LeRobot | 0.5.2 (source install, `[feetech]`) |
+| LeRobot | v0.6.0 source, installed without its dependency set. The Feetech SDK is installed separately. |
 | PyTorch | 2.11.0+rocm7.13.0 from `repo.amd.com/rocm/whl/<detected gfx>`. The PyPI wheel is not used; it downloads the NVIDIA CUDA stack. |
 | Robot | LeRobot SO-101 follower arm |
+
+LeRobot is checked out at v0.6.0 and installed with `--no-deps`. No LeRobot release accepts torchvision 0.26, numpy below 2, and huggingface-hub below 1.0 at the same time. v0.6.0 is the source whose code accepts the ROCm torchvision wheel. numpy and huggingface-hub stay on the pins in `requirements.txt`. The arm packages installed beside it are draccus, the Feetech SDK, pyserial, and deepdiff.
 
 ## Compute placement
 
@@ -158,9 +162,8 @@ The pipeline is powered by AI models that utilize every subsystem of the APU. Ea
 <tr><th style="background-color: rgba(128, 128, 128, 0.2); border: 1px solid rgba(128, 128, 128, 0.4)">Task</th><th style="border: 1px solid rgba(128, 128, 128, 0.4)">Model or algorithm</th><th style="border: 1px solid rgba(128, 128, 128, 0.4)">What it does</th><th style="border: 1px solid rgba(128, 128, 128, 0.4)">Runs on</th><th style="border: 1px solid rgba(128, 128, 128, 0.4)">Runtime</th></tr>
 </thead>
 <tbody>
-<tr style="background-color: rgba(0, 0, 0, 0)"><td rowspan="3" valign="top" style="background-color: rgba(128, 128, 128, 0.2); vertical-align: top; border: 1px solid rgba(128, 128, 128, 0.4)">Voice control</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">WebRTC VAD, a Gaussian mixture model</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">finds where a spoken sentence starts and ends</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">CPU</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)"><code>webrtcvad</code> (C library)</td></tr>
-<tr style="background-color: rgba(0, 0, 0, 0)"><td style="border: 1px solid rgba(128, 128, 128, 0.4)">Whisper-base</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">speech → text</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">CPU</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">ONNX Runtime</td></tr>
-<tr style="background-color: rgba(0, 0, 0, 0)"><td style="border: 1px solid rgba(128, 128, 128, 0.4)">Llama 3.2 3B Instruct (Q4_K_M)</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">text → command</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">iGPU</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)"><code>llama.cpp</code> <code>llama-server</code> (HIP)</td></tr>
+<tr style="background-color: rgba(0, 0, 0, 0)"><td rowspan="2" valign="top" style="background-color: rgba(128, 128, 128, 0.2); vertical-align: top; border: 1px solid rgba(128, 128, 128, 0.4)">Voice control</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">Silero VAD</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">marks 20 ms frames that contain speech</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">CPU</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">ONNX Runtime</td></tr>
+<tr style="background-color: rgba(0, 0, 0, 0)"><td style="border: 1px solid rgba(128, 128, 128, 0.4)">Gemma 4 E4B-IT (Q4_0)</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">an utterance of audio → command</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">iGPU</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)"><code>llama.cpp</code> <code>llama-server</code> (HIP) and the audio projector</td></tr>
 <tr style="background-color: rgba(0, 0, 0, 0)"><td rowspan="2" valign="top" style="background-color: rgba(128, 128, 128, 0.2); vertical-align: top; border: 1px solid rgba(128, 128, 128, 0.4)">Gestures</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">YOLOv26s-pose</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">finds your body and wrist</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">NPU</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">ONNX Runtime, VitisAI EP</td></tr>
 <tr style="background-color: rgba(0, 0, 0, 0)"><td style="border: 1px solid rgba(128, 128, 128, 0.4)">MediaPipe Hands</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">detects the hand gesture (pinch, roll)</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">CPU</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">MediaPipe Tasks</td></tr>
 <tr style="background-color: rgba(0, 0, 0, 0)"><td rowspan="2" valign="top" style="background-color: rgba(128, 128, 128, 0.2); vertical-align: top; border: 1px solid rgba(128, 128, 128, 0.4)">Object localization</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">YOLOv26s-detect</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">finds the named object in the arm camera</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">NPU</td><td style="border: 1px solid rgba(128, 128, 128, 0.4)">ONNX Runtime, VitisAI EP</td></tr>
@@ -169,13 +172,13 @@ The pipeline is powered by AI models that utilize every subsystem of the APU. Ea
 </tbody>
 </table>
 
-The VAD hands Whisper one whole sentence at a time; [Voice latency](#voice-latency) explains how it decides that a sentence is over.
+An utterance goes to Gemma the moment the person falls silent. [Voice latency](#voice-latency) has the measured times; the samples are not denoised.
 
 Every NPU session is built through one shared factory (`vla_pipeline/utils/npu_session.py`), and each model's `device:` is set in `config/pipeline.yaml`.
 
 ### NPU load order (important)
 
-YOLO-pose and YOLO-detect run on the NPU. Whisper stays on the CPU.
+YOLO-pose and YOLO-detect run on the NPU. Voice does not: Silero is on the CPU and Gemma 4 is on the iGPU.
 
 Those two sessions share buffers within a process. The first one sizes them, and they last until the last one closes. Opening YOLO-pose while YOLO-detect is already open fails with `HW context creation unsuccessful / sub buffer size and offset`. `size_npu` opens YOLO-pose first and keeps that session for the life of the process, so the detector can load after it.
 
@@ -238,7 +241,7 @@ flowchart LR
 | `camera_mount_node` | `python -m vla_pipeline.vision.camera_node --role mount` (launch/run_pipeline) | Captures the human-facing camera and publishes frames + health | the mount V4L2 device |
 | `camera_arm_node` | `python -m vla_pipeline.vision.camera_node --role arm` | Captures the end-effector camera and publishes frames + health | the arm V4L2 device |
 | `so101_server_node` | `python -m vla_pipeline.robot.robot_node --server` (`launch/strix_vla.launch.py`) | **Sole owner of the Feetech bus** and ros2_control's hardware side: writes every setpoint the controllers send at `control_fps`, streams joint state with velocity and gripper effort, owns the `gripper_torque_limit_nm` parameter, parks the arm at rest on shutdown | the SO-101 serial bus |
-| `controller_manager` | `ros2_control_node` (`launch/so101_control.launch.py`) | Runs the controllers at `robot.control_fps` on `topic_based_ros2_control`, which reaches `so101_server_node` over the hardware topics. The spawners start `joint_state_broadcaster`, `arm_controller` and `gripper_forward_controller`, and load `arm_forward_controller` and `gripper_action_controller` inactive | — |
+| `controller_manager` | `ros2_control_node` (`launch/so101_control.launch.py`) | Runs the controllers at `robot.control_fps` on `topic_based_ros2_control`, which reaches `so101_server_node` over the hardware topics. `so101_sim.controller_bringup`, started by the same launch, activates `joint_state_broadcaster`, `arm_controller` and `gripper_forward_controller`, and loads `arm_forward_controller` and `gripper_action_controller` inactive. It sends each request once and takes the next step when the controller manager's status (`/controller_manager/activity`) shows the last one done, so a lost reply does not delay it; ROS's `spawner` waits 10 s for a reply before it asks again | — |
 | `robot_state_publisher` | `launch/so101_control.launch.py` | Publishes the SO-101 description (`so101_sim/description/so101.urdf.xacro`) | — |
 | `camera_client_mount` | created inside `vla_pipeline.main` (`Ros2Camera`) | Subscribes to the mount image topic, hands the latest frame to behaviors | — |
 | `camera_client_arm` | created inside `vla_pipeline.main` (`Ros2Camera`) | Subscribes to the arm image topic for detection / jaw verification | — |
@@ -292,33 +295,32 @@ vvla-pipeline/
 ├── tests/                        # automated tests: the stacks on the twin, the notebooks (see below)
 ├── workshop/                     # the hands-on workshop, with its own copy of the behavior code (common/)
 ├── config/
-│   ├── pipeline.yaml             # all tunables (cameras, vad, gesture_mimic, pick_place, grip, …)
-│   ├── intent.gbnf               # GBNF grammar: {"command","object"}
-│   ├── vaiep_config.json         # VitisAI compiler config for YOLO (BF16, VAIML)
-│   └── vitisai_config_whisper_{encoder,decoder}.json
+│   ├── pipeline.yaml             # all tunables (cameras, gemma4-e4b-it, gesture_mimic, pick_place, grip, …)
+│   ├── intent.gbnf               # GBNF grammar: the list [command, object, words heard]
+│   └── vaiep_config.json         # VitisAI compiler config for YOLO (BF16, VAIML)
 ├── launch/
 │   ├── strix_vla.launch.py       # cameras (mount+arm) + SO-101 server node (or the twin) + controllers
-│   └── so101_control.launch.py   # robot_state_publisher, ros2_control_node, the controller spawners
+│   └── so101_control.launch.py   # robot_state_publisher, ros2_control_node, the controllers' bring-up
 ├── scripts/
 │   ├── calibrate_arm_camera.py   # arm camera intrinsics + mount on the gripper (pick_place IK)
 │   ├── compile_npu_models.{py,sh} # compile the YOLO ONNX for the NPU (SDK venv)
-│   ├── export_whisper_onnx.py    # Whisper encoder/decoder ONNX export
+│   ├── ensure_voice.sh           # Gemma 4 GGUF, audio projector, Silero, llama-server check
 │   ├── export_yolo26s_pose.py    # body-keypoint ONNX export
 │   ├── export_yolo26s_detect.py  # 80-class detection ONNX export
 │   ├── ryzen_ai_env.sh           # LD_LIBRARY_PATH for the VitisAI EP runtime
 │   ├── verify_npu_stack.py       # check that the VitisAI EP loads
 │   ├── validate_setup.sh         # check scripts, SDK, caches and .venv
-│   └── install_kernel.sh         # register .venv Jupyter kernel + start llama-server
+│   └── install_kernel.sh         # register .venv Jupyter kernel; ensure_voice.sh checks the voice files
 └── vla_pipeline/
     ├── main.py                   # orchestrator: handler registry, listener thread
     ├── dispatch.py               # transcript checks, stop fast path, behavior dispatch loop
     ├── console.py                # twin console window (--digital-twin)
     ├── audio/
-    │   ├── whisper_npu.py        # WhisperONNX + mic capture
-    │   └── vad_listener.py       # VAD utterance capture (1.2 s end-of-speech)
+    │   └── gemma_listen.py       # offset removal, the utterance cut, the level raise
     ├── llm/
     │   ├── intents.py            # Intent enum, ParsedCommand, CommandRegistry, system prompt
-    │   └── llama_intent.py       # llama-server lifecycle + intent parsing (object slot)
+    │   ├── llama_intent.py       # llama-server lifecycle + Gemma audio and text parsing
+    │   └── voice.py              # the microphone thread; voice_intent gemma4-e4b-it
     ├── vision/
     │   ├── camera.py             # CameraClient (direct / ROS 2) per role
     │   ├── camera_node.py        # ROS 2 camera publisher node
@@ -351,136 +353,66 @@ The pipeline and the workshop each keep their own copy of the arm layer, the ser
 
 ## Installation
 
-Install the NPU driver, confirm the driver sees the NPU, then install Ryzen AI Software 1.7.1, then this repository. The driver steps match [Linux Installation Instructions](https://ryzenai.docs.amd.com/en/1.7.1/linux.html) and [workshops/ryzen-ai-always-on/README.md](../ryzen-ai-always-on/README.md).
-
-Ubuntu 24.04 LTS, kernel 6.10 or newer, Python 3.12, 64 GB of RAM recommended. The NPU PCI id is `1022:17f0`. If that search prints nothing, stop.
-
-```bash
-sudo apt update
-sudo apt install -y python3.12 python3.12-venv libboost-filesystem1.74.0 dkms
-lspci -nn | grep 1022:17f0
-```
+Ubuntu 24.04, kernel 6.10 or newer, Python 3.12. 64 GB of RAM is recommended. Three stages: the NPU driver, Ryzen AI Software 1.7.1, then this repository. Driver details match the [Ryzen AI 1.7.1 Linux instructions](https://ryzenai.docs.amd.com/en/1.7.1/linux.html).
 
 Download both packages from the Ryzen AI Software downloads page:
 
 - [NPU drivers, `RAI_1.7.1_Linux_NPU_XRT.zip`](https://account.amd.com/en/forms/downloads/xef.html?filename=RAI_1.7.1_Linux_NPU_XRT.zip)
 - [Ryzen AI Software, `ryzen_ai-1.7.1.tgz`](https://account.amd.com/en/forms/downloads/xef.html?filename=ryzen_ai-1.7.1.tgz)
 
-Install the four driver packages. The zip may unpack into a subdirectory, so the `find` lands in the directory that holds the `.deb` files. `xrt-smi examine` must list a device under `Device(s) Present`. The name depends on the machine (`RyzenAI-npu5`, `NPU Strix`, `NPU Strix Halo`). If the table is empty, stop. Do not compile a model yet.
+### 1. NPU driver
+
+The NPU PCI id is `1022:17f0`. If that search prints nothing, stop. The zip may unpack into a subdirectory, so `find` lands in the directory that holds the `.deb` files. `xrt-smi examine` must list a device (`RyzenAI-npu5`, `NPU Strix`, or `NPU Strix Halo`). If the table is empty, stop.
 
 ```bash
+sudo apt update
+sudo apt install -y python3.12 python3.12-venv libboost-filesystem1.74.0 dkms
+lspci -nn | grep 1022:17f0
 cd ~/Downloads
 unzip -o RAI_1.7.1_Linux_NPU_XRT.zip -d RAI_1.7.1_Linux_NPU_XRT
 cd "$(dirname "$(find RAI_1.7.1_Linux_NPU_XRT -name 'xrt_202610.2.21.75_24.04-amd64-base.deb' -print -quit)")"
-sudo apt install --fix-broken -y ./xrt_202610.2.21.75_24.04-amd64-base.deb
-sudo apt install --fix-broken -y ./xrt_202610.2.21.75_24.04-amd64-base-dev.deb
-sudo apt install --fix-broken -y ./xrt_202610.2.21.75_24.04-amd64-npu.deb
-sudo apt install --fix-broken -y ./xrt_plugin.2.21.260102.53.release_24.04-amd64-amdxdna.deb
+sudo apt install --fix-broken -y \
+  ./xrt_202610.2.21.75_24.04-amd64-base.deb \
+  ./xrt_202610.2.21.75_24.04-amd64-base-dev.deb \
+  ./xrt_202610.2.21.75_24.04-amd64-npu.deb \
+  ./xrt_plugin.2.21.260102.53.release_24.04-amd64-amdxdna.deb
 export LD_LIBRARY_PATH="/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
 source /opt/xilinx/xrt/setup.sh
 xrt-smi examine
 ```
 
-Unpack the software installer into `~/ryzen_ai-1.7.1` and create its virtual environment there. `quicktest.py` compiles a small CNN and runs it on the NPU. It prints `Test Finished`. The provider list must include `VitisAIExecutionProvider`.
+### 2. Ryzen AI Software
+
+This creates `~/ryzen_ai-1.7.1/venv`. Do not unpack the SDK inside this repository. `venv/quicktest/quicktest.py` is the SDK's own NPU check: it compiles a small CNN and prints `Test Finished`, and the provider list includes `VitisAIExecutionProvider`.
 
 ```bash
 mkdir -p ~/ryzen_ai-1.7.1
 cd ~/ryzen_ai-1.7.1
 tar -xvzf ~/Downloads/ryzen_ai-1.7.1.tgz
 ./install_ryzen_ai.sh -a yes -p $PWD/venv
-source /opt/xilinx/xrt/setup.sh
-source $PWD/venv/bin/activate
-python -c "import onnxruntime as ort; print(ort.get_available_providers())"
-cd venv/quicktest && python quicktest.py
-deactivate
 ```
 
-`$PWD/venv` is `~/ryzen_ai-1.7.1/venv`. Then clone this repository once. The NPU compile cache is not in git. Ultralytics is AGPL-3.0, so `./bootstrap.sh` does not install it or export the YOLO ONNX files. Export them with `scripts/export_yolo26s_pose.py` and `scripts/export_yolo26s_detect.py`, then compile:
+### 3. This repository
+
+Clone once. Do not clone this repository again inside the workshop. Ultralytics is AGPL-3.0, so `./bootstrap.sh` does not install it or export the YOLO ONNX files. The first bootstrap passes `--skip-compile` because those files do not exist yet. The second one compiles them.
 
 ```bash
 git clone https://github.com/amd/embedded-x86-ai
-export RYZEN_AI_WHEELS=~/ryzen_ai-1.7.1
 cd embedded-x86-ai/workshops/vvla-pipeline
+export RYZEN_AI_WHEELS=~/ryzen_ai-1.7.1
 ./bootstrap.sh --skip-compile
 source .venv/bin/activate
 pip install 'ultralytics' 'onnxslim>=0.1.82' 'numpy==1.26.4' 'opencv-contrib-python==4.11.0.86'
 python scripts/export_yolo26s_pose.py
 python scripts/export_yolo26s_detect.py
-deactivate
 ./bootstrap.sh --skip-apt --skip-llama --skip-models
-source .venv/bin/activate
-source scripts/ryzen_ai_env.sh
 ```
 
-The first `bootstrap.sh` creates `.venv` and downloads the Whisper ONNX, the Whisper tokenizer (`openai/whisper-base.en`), and the Llama GGUF. Whisper runs on the CPU from that ONNX. `--skip-compile` is only for that pass, because the YOLO ONNX files do not exist yet. The `pip install` and the two `scripts/export_yolo26s_*.py` commands export the YOLO ONNX files. The second `bootstrap.sh` compiles YOLO-pose and YOLO-detect into `cache/` for the NPU. Those `.rai` files stay on the machine. Do not clone this repository again inside the workshop, and do not unpack the SDK into the repository.
+`./bootstrap.sh` installs the apt packages, ROCm, the `.venv`, the ROCm PyTorch wheels, LeRobot v0.6.0 without its dependency set, and llama.cpp with HIP (gfx1100 on Strix). A checkout on another LeRobot release is moved to v0.6.0. numpy stays below 2 and huggingface-hub stays on 0.34.2 through 0.35.x, because those are the pins in `requirements.txt`. ONNX Runtime needs the numpy 1.x ABI, and transformers needs huggingface-hub below 1.0. It downloads the Gemma 4 E4B GGUF and its audio projector with `hf download` from `ggml-org/gemma-4-E4B-it-GGUF`, and Silero VAD v6.2.3, through `scripts/ensure_voice.sh`. It installs ROS 2 Jazzy when it is absent, plus ros2_control, the controllers, and `topic_based_ros2_control` 0.3.0 with the patches in `patches/topic_based_ros2_control/`, and builds that into `ros_ws/`. The second run writes `cache/yolo26s_pose_fp32/` and `cache/yolo26s_detect_fp32/` (about 16 minutes and 3 minutes). `./run_pipeline.sh` sources the venv, ROS 2, and `scripts/ryzen_ai_env.sh`.
 
-The NPU compile takes about 20 minutes on a Ryzen AI APU with Ryzen AI SW 1.7.1. YOLOv26s-pose took about 16 minutes and YOLOv26s-detect about 3 minutes. Once `cache/` holds a model's `.rai`, later sessions load it in about a second.
+`cache/` is not in git and does not copy to another machine: a cache from a different compiler loads and then mis-detects (`recompile model with latest VAIML version`). Delete the two directories above and run the second bootstrap again on this machine. To rebuild one model, remove its directory and run `scripts/compile_npu_models.sh --only yolo_pose` (or `yolo_detect`). When those `.rai` files were already compiled here, skip the export and the second bootstrap: `./bootstrap.sh --skip-compile` is the whole repository step. Other flags are `--skip-apt`, `--skip-llama`, `--skip-models`, and `--cpu-only`.
 
-A cache built on another machine, or with an older compiler than this driver, loads and then mis-detects. The runtime says `recompile model with latest VAIML version`. Delete `cache/yolo26s_pose_fp32` and `cache/yolo26s_detect_fp32` and compile again on this machine. Do not copy `cache/` between machines.
-
-When `cache/` already contains `.rai` files compiled on this machine with this driver, skip the export and the compile:
-
-```bash
-export RYZEN_AI_WHEELS=~/ryzen_ai-1.7.1
-./bootstrap.sh --skip-compile
-```
-
-`bootstrap.sh`:
-
-1. apt build deps (ffmpeg, cmake, portaudio, libav*, …)
-2. **uv venv at `./.venv`** with `--system-site-packages` (so ROS 2 Jazzy's `rclpy` stays importable)
-3. PyTorch `2.11.0+rocm7.13.0` from the AMD wheel index for the detected GPU, installed before the other Python deps. The PyPI torch wheel is not installed: it downloads the NVIDIA CUDA stack (`nvidia-cublas`, `nvidia-cudnn-cu13`).
-4. Python deps from `requirements.txt` (incl. optional `webrtcvad`), with that torch build pinned so a later resolver cannot replace it
-5. Ryzen AI onnxruntime (VitisAI EP) from `$RYZEN_AI_WHEELS`
-6. LeRobot 0.5.2 `[feetech]` from source → `third_party/lerobot`
-7. llama.cpp HIP build (`-DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1100`, `llama-server`) → `third_party/llama.cpp`
-8. Model downloads: Llama-3.2-3B-Instruct Q4_K_M GGUF, Whisper-base ONNX, and the Whisper tokenizer (`openai/whisper-base.en`). Whisper runs on the CPU. YOLO ONNX is exported with `python scripts/export_yolo26s_pose.py` and `python scripts/export_yolo26s_detect.py` (see the install steps above).
-9. ROS 2 Jazzy (installed if absent; required), ros2_control and the controllers, and `topic_based_ros2_control` 0.3.0 with the patches in `patches/topic_based_ros2_control/`, built into `ros_ws/`
-
-Flags: `--skip-apt`, `--skip-llama`, `--skip-models`, `--skip-compile`,
-`--cpu-only` (dev machine without ROCm/NPU). `--skip-compile` skips the NPU build. Use it on the first pass above, and again when `cache/*.rai` is already present. The compile pass omits `--skip-compile` and writes `cache/`.
-
-> **Note:** `meta-llama/Llama-3.2-3B-Instruct` is gated; the script downloads the community Q4_K_M GGUF and prints a warning with manual instructions if the download requires authentication (`hf auth login`).
-
-### NPU cache
-
-`cache/` is gitignored. The second `bootstrap.sh` above builds it (YOLO-pose about 16 minutes, YOLO-detect about 3 minutes):
-
-```text
-cache/yolo26s_pose_fp32/yolo26s_pose_fp32.rai
-cache/yolo26s_detect_fp32/yolo26s_detect_fp32.rai
-```
-
-Rebuild one model by removing its directory and compiling that family again:
-
-```bash
-rm -rf cache/yolo26s_pose_fp32
-export RYZEN_AI_WHEELS=~/ryzen_ai-1.7.1
-scripts/compile_npu_models.sh --only yolo_pose
-```
-
-**Run from the deployment venv** — Python packages come from `.venv`, compiled models come from `cache/`, and native runtime libraries come from the Ryzen AI install.
-
-Download a short public sample (OpenAI Whisper's JFK clip) and convert it to 16 kHz mono WAV:
-
-```bash
-curl -fsSL -o /tmp/jfk.flac \
-  https://raw.githubusercontent.com/openai/whisper/main/tests/jfk.flac
-ffmpeg -y -i /tmp/jfk.flac -ar 16000 -ac 1 /tmp/speech.wav
-```
-
-Then:
-
-```bash
-source .venv/bin/activate
-source scripts/ryzen_ai_env.sh
-python scripts/verify_npu_stack.py --preflight
-python -m vla_pipeline.audio.whisper_npu --input /tmp/speech.wav --device npu
-```
-
-`config/pipeline.yaml` defaults Whisper to CPU to preserve NPU capacity for
-YOLO. Pass `--device npu` for this component test. In a remote SSH/Cursor
-session, use a WAV file; `--input mic` records the remote host's microphone.
+`scripts/verify_npu_stack.py --preflight` confirms the VitisAI provider. `scripts/ensure_voice.sh` confirms the Gemma GGUF, the audio projector, Silero, and a `llama-server` built with Gemma 4 audio.
 
 ### Robot prerequisites (hardware runs only)
 
@@ -547,7 +479,7 @@ Hold your hand at a comfortable mid-distance, then paste the printed `hand_size_
 
 ### Pose backend choice
 
-Kept: **YOLOv26s-pose on the NPU for the body + MediaPipe Hands on CPU for the pinch.** Rationale: the NPU session is already compiled/cached, runs at camera rate without touching CPU/iGPU budgets needed by Llama and MediaPipe, and COCO-17 keypoints are exactly what the mapper needs; MediaPipe Hands remains the best cheap pinch detector. The often-suggested alternative — MediaPipe Pose with world landmarks (metric 3-D, CPU) — would give Z without calibration, but costs CPU it would share with MediaPipe Hands, adds a second pose stack to fuse, and its world-landmark Z is noisy enough at 2-3 m that it needs the same One Euro treatment anyway. The mapper is backend-agnostic (consumes COCO-17 arrays), so swapping the estimator later is a one-file change.
+Kept: **YOLOv26s-pose on the NPU for the body + MediaPipe Hands on CPU for the pinch.** Rationale: the NPU session is already compiled/cached, runs at camera rate without touching CPU/iGPU budgets needed by Gemma and MediaPipe, and COCO-17 keypoints are exactly what the mapper needs; MediaPipe Hands remains the best cheap pinch detector. The often-suggested alternative — MediaPipe Pose with world landmarks (metric 3-D, CPU) — would give Z without calibration, but costs CPU it would share with MediaPipe Hands, adds a second pose stack to fuse, and its world-landmark Z is noisy enough at 2-3 m that it needs the same One Euro treatment anyway. The mapper is backend-agnostic (consumes COCO-17 arrays), so swapping the estimator later is a one-file change.
 
 ## Gripper: closing on contact
 
@@ -560,26 +492,39 @@ Kept: **YOLOv26s-pose on the NPU for the body + MediaPipe Hands on CPU for the p
 
 ## Voice latency
 
-| Stage | Time |
+A sentence is sent the moment it has ended, and its command is acted on the moment Gemma has written it.
+
+1. **The utterance.** A constant offset is first taken out of the microphone's samples (a built-in microphone was measured to deliver samples around +1028, which alone reads −30 dBFS). Silero marks each 20 ms frame as speech or not. An utterance starts at the first speech frame, with `pre_roll_ms` (300 ms) of the sound before it, and is sent on the frame that completes `end_silence_ms` (300 ms) of silence: one request per sentence. Gemma takes a whole clip, not sound as it comes, so the end of the speech is the earliest moment a sentence can be sent. An utterance is at most `window_s` (6 s) long; one with less than `min_voice_ms` (100 ms) of speech is dropped. It is raised to a fixed level before it is sent, because Gemma hears quiet sound worse.
+2. **The answer.** Gemma writes the list `["<command>", "<object>", "<words heard>"]`, and the client reads it as it is written. The command and the object come first: the behavior starts when they are complete, while Gemma still writes the words it heard. The words are shown when they arrive. An utterance that holds no command ends its request there. A typed sentence ends its request at the command too.
+3. **The warm-up.** One request is sent when the server has started, so the first spoken command does not pay for the model reading in its instructions.
+
+Measured on a Strix Halo (Ryzen AI Max+ 395) with sentences of a synthetic voice played in real time through the listener and the real Gemma, from the end of a sentence to its command:
+
+| Listener | min / median / max |
 |---|---|
-| End of utterance | 1.2 s of silence (`audio.vad.hangover_s`) |
-| Speech → text (Whisper-base on the CPU, short command) | a few hundred ms |
-| Intent (Llama, GBNF) | ~0.1 s (keep-alive HTTP session) |
+| before: the last 6 s of sound sent every 2 s, the whole answer awaited | 0.87 / 2.01 / 2.22 s |
+| now: one utterance, the command acted on when written | 0.45 / 0.46 / 0.71 s |
 
-The voice activity detector (VAD) in `vla_pipeline/audio/vad_listener.py` listens to the microphone in 30 ms steps and decides where each spoken sentence starts and ends. Its settings are under `audio.vad` in `config/pipeline.yaml`:
+The second row was measured on 2026-11-25 with llama.cpp build 12720; an earlier build, 11548, gave 0.55 / 0.55 / 0.77 s for the same listener. Of the 0.46 s, 0.3 s is the end silence and 0.15 s is the request up to the command; the words heard follow 0.11 to 0.16 s later. The slowest of the six sentences is "pick up the ball", the first one and the only one with an object: its request takes 0.39 s to the command. Every command logs its own time: `Command 'home' 0.46 s after the end of the speech (request 0.15 s to the call)`. `tests/sim/test_voice_live.py` repeats the measurement.
 
-- **End of a sentence:** 1.2 s of silence (`hangover_s`), or 12 s at most. A shorter pause splits a sentence: at 0.35 s, "pick up ... the cube" arrived as "pink up" (parsed as dance) and "the cube".
-- **Start of a sentence:** the VAD keeps the 0.3 s before it heard speech (`pre_roll_s`), so the first syllable is not cut off.
-- **Too short:** less than 0.25 s of speech (`min_speech_s`), such as a click or a cough, is dropped.
-- **Detector:** `webrtcvad` when it is installed (`backend: auto`); otherwise a simpler detector that compares the sound level with the room's background noise.
+Two more measurements, both on the same machine:
 
-`webrtcvad` is Google's WebRTC voice activity detector, a small statistical model, not a neural network. It splits each 30 ms frame into six frequency bands between 80 Hz and 4 kHz and measures the energy in each. Two Gaussian mixture models, one for speech and one for background noise, then say which of the two those six numbers look more like. Both models keep adapting to the room's noise while the VAD runs. `aggressiveness` (0 to 3) sets how sure the VAD must be before it calls a frame speech. Source: [WebRTC `common_audio/vad`](https://webrtc.googlesource.com/src/+/refs/heads/main/common_audio/vad/) (`vad_filterbank.c` for the bands, `vad_core.c` for the models); Python binding: [py-webrtcvad](https://github.com/wiseman/py-webrtcvad).
+- **A person at the microphone, with two talk shows playing beside it** (2026-11-25, the digital twin notebook running, the first 14 minutes, times from the `llama-server` log). Of 96 requests, 67 ended at the call, which is where a sentence without a command ends: 0.21 / 0.24 / 0.34 s (min / median / max). The 29 spoken commands were read to the end, words included, in 0.29 / 0.44 / 0.56 s. The person reported that the commands were understood over the other voices. The time from the end of a spoken sentence to its command was not logged in that session.
+- **While the digital twin renders on the same iGPU.** A spoken clip's request takes 3 % longer up to the command: 0.227 s instead of 0.220 s (median), with the twin rendering its wrist, mount and 3-D views.
 
-"Stop" also skips Llama, so it never waits for the language model. Measure the timing live: `python -m vla_pipeline.audio.vad_listener --mic`.
+A spoken "stop robot" is a command Gemma returns like any other, so a stop takes the same time. "stop" alone does nothing.
+
+### No denoiser
+
+An utterance is sent with the microphone's constant offset taken out and raised to a fixed level; nothing else is done to it. There is no noise-suppression stage. Google's audio guide for Gemma 4 specifies one channel, 16 kHz, float samples from −1 to 1, and a Fourier resample. It does not specify a denoiser ([Audio understanding](https://ai.google.dev/gemma/docs/capabilities/audio)).
+
+A cleaner in front of this model is a poor trade. Gemma 4 E4B is weaker on noisy spontaneous speech than on clean read speech, and it inserts words when the audio is hard ([Open ASR write-up](https://twango.dev/writing/gemma4-asr-benchmark)). A 20-clip noisy-English set measured 7.6% word error ([TypeWhisper](https://typewhisper.github.io/typewhisper-benchmark/?model=crispasr%3Agemma4-e4b-it-q8_0&view=model)). MetricGAN raised the error for Whisper, Parakeet, and Gemini on every noise condition tried, including clips that were already clean ([When De-noising Hurts](https://arxiv.org/html/2512.17562)). SAM-Audio separation raised the signal-to-noise ratio and still raised Whisper's word error ([When Audio Separation Hurts](https://arxiv.org/html/2603.04710v2)). On large audio-language models, ordinary denoisers sometimes made the internal noise measure worse ([SEE](https://arxiv.org/html/2601.07331)). The enhancer invents a spectrum the encoder was not trained on, and the language model then guesses the missing words.
+
+A tradeshow floor is another person talking. Silero treats that as speech and passes it. Separating one voice out of a crowd is the approach those measurements found raised error. A mild steady-noise suppressor (RNNoise or DeepFilterNet, gain only where speech is absent) is a later experiment for a fan louder than the visitors, scored by whether the command intent still matches. It is not this path. The NPU overlay is unrelated: Gemma's audio encoder runs on the iGPU through `llama-server`.
 
 ## Voice pick-and-place
 
-"Pick up the ball" → `{"command": "pick_place", "object": "ball"}` → `run_pick_place` in `vla_pipeline/behaviors/manipulation.py`: the arm walks `scan_pans` and stops at the first settled frame with a usable box, kept with the joints that took it → YOLOv26s-detect on the arm camera grounds the name (synonym table: ball→sports ball, mug→cup, …) → that box is located once on the table → one grasp solve → a joint-space descent → the same feedback-based close as grip, a short settle, a holding check (one fresh frame and one more locate if the grasp slips) → lift the grasp above the other objects and hold the object out toward the operator. The jaws stay closed.
+"Pick up the ball" → the command `pick_place` with the object `ball` → `run_pick_place` in `vla_pipeline/behaviors/manipulation.py`: the arm walks `scan_pans` and stops at the first settled frame with a usable box, kept with the joints that took it → YOLOv26s-detect on the arm camera grounds the name (synonym table: ball→sports ball, mug→cup, …) → that box is located once on the table → one grasp solve → a joint-space descent → the same feedback-based close as grip, a short settle, a holding check (one fresh frame and one more locate if the grasp slips) → lift the grasp above the other objects and hold the object out toward the operator. The jaws stay closed.
 
 **Locate:** objects rest on the table, so one camera is enough. Forward kinematics of the SO-101 model (`so101_sim/src/so101_sim/kinematics.py`) at the current joint angles gives the wrist camera's pose; rays through the YOLO box meet the table plane, then a class-specific footprint is fitted: sphere for a sports ball, upright bottle, or flat footprint for a book/toothbrush. For the elongated toothbrush, YOLO supplies the crop but not an angle: PCA on the pixels inside that crop finds its long image axis and camera rays carry it onto the table. **IK reach:** one five-joint constrained SQP solve uses MuJoCo's analytic point and angular Jacobians to put the point between the open jaws on the object, keep the closing axis horizontal, and (for a toothbrush) make the jaws close across its long axis. Beside a ball or other lying object, the hand then moves sideways at grasp height until the fixed finger is `fixed_jaw_gap_m` (5 mm) away, so the moving jaw only pushes the object that far instead of across half the jaw opening. Joint limits and a per-step trust region are hard constraints; geometric SO-101 elbow solutions seed the optimizer, while MuJoCo FK remains the source of truth. The jaws then open above the object and descend in joint space. Each step stays within 5 mm of the planned vertical and above the table; when a joint line leaves that band, the same bound is met with Cartesian steps. Reach is ~14–30 cm from the base. A box cut by the image edge is skipped and the next stored frame is located. An object that cannot be solved is out of reach, and the arm says so. Only the arm camera can locate an object, so with it offline the arm says so and does not pick.
 
@@ -611,7 +556,7 @@ the scan says it cannot see a bottle and the grasp never starts.
 2. Add the name to the `cmd` rule in `config/intent.gbnf`.
 3. Register a handler in `vla_pipeline/main.py`: `@registry.register(Intent.MY_COMMAND)` — it receives `(ctx, cmd)` with the arm, cameras, models, `cmd.params`, and `ctx.stop_check`.
 
-`wave` and `home` (`vla_pipeline/behaviors/simple.py`) are the template. `stop` is keyword-matched on the raw transcript and interrupts any running behavior — including mid-move (every move's wait checks `stop_check`).
+`wave` and `home` (`vla_pipeline/behaviors/simple.py`) are the template. `stop robot` (Gemma's `stop` command when spoken, a keyword match when typed) interrupts any running behavior — including mid-move (every move's wait checks `stop_check`). "stop" alone is not a command.
 
 ## Testing each component independently
 
@@ -620,9 +565,8 @@ Most components are standalone modules with their own `__main__` self-test. Pick
 | Component | Needs hardware? | Command |
 |---|---|---|
 | Camera→joint mapping (One Euro/depth) | no (twin) | `./run_sim_tests.sh -k mimic` |
-| VAD listener | no | `python -m vla_pipeline.audio.vad_listener --selftest` |
-| Intent grammar + parser | no (needs llama-server build) | `python -m vla_pipeline.llm.llama_intent --selftest` |
-| Whisper STT | mic or wav | `python -m vla_pipeline.audio.whisper_npu --input mic --device npu` |
+| Intent grammar + parser | Gemma server running | `python -m vla_pipeline.llm.llama_intent --selftest` |
+| Spoken sentences → commands, with their times | no (a synthetic voice stands in for the microphone; the real Gemma on the iGPU) | `./run_sim_tests.sh -k voice_live -s` |
 | YOLO pose | webcam | `python -m vla_pipeline.vision.yolo_pose_npu --device npu` |
 | YOLO detect | webcam | `python -m vla_pipeline.vision.yolo_detect_npu --find ball --role arm` |
 | MediaPipe hands | webcam | `python -m vla_pipeline.vision.mediapipe_hands` |
@@ -656,18 +600,18 @@ cd workshop && ./run_notebooks.sh --test    # notebooks and the Instructor's cor
 ./run_sim_tests.sh                          # NPU load order and the twin stacks
 ```
 
-`./run_notebooks.sh --test` does the setup [workshop/README.md](workshop/README.md) describes: the `.venv`, the Ryzen AI runtime, ROS 2, the `vvla-workshop` kernel and llama-server on the iGPU. Then it runs the notebooks in `workshop/notebooks/`, in the README's order, and the README's Instructor's corner commands. The notebooks need llama-server, which that command starts.
+`./run_notebooks.sh --test` does the setup [workshop/README.md](workshop/README.md) describes: the `.venv`, the Ryzen AI runtime, ROS 2, the `vvla-workshop` kernel, and the check of the Gemma files and `llama-server` (`scripts/ensure_voice.sh`). Then it runs the notebooks in `workshop/notebooks/`, in the README's order, and the README's Instructor's corner commands. A notebook that needs Gemma starts its own `llama-server`.
 
-`./run_sim_tests.sh` uses the same `.venv`, Ryzen AI runtime, and ROS 2. It runs `pytest tests/npu`, then `pytest tests/sim -m "sim and not docs"`. Arguments after the command go to the twin tests only. It does not start llama-server or Jupyter, and it does not run the tests marked `docs` (the notebooks, the Instructor's corner, and the notebook console). Those belong to `./run_notebooks.sh --test`, which stands in a generated frame for the webcam and a scripted person for pose.
+`./run_sim_tests.sh` uses the same `.venv`, Ryzen AI runtime, and ROS 2. It runs `pytest tests/npu`, then `pytest tests/sim -m "sim and not docs"`. Arguments after the command go to the twin tests only. It does not start Jupyter (the one `llama-server` in it is the one `tests/sim/test_voice_live.py` starts for itself), and it does not run the tests marked `docs` (the notebooks, the Instructor's corner, and the notebook console). Those belong to `./run_notebooks.sh --test`, which stands in a generated frame for the webcam and a scripted person for pose. The notebook reads that frame in this process. It does not open `/dev/video0` or wait on `/cameras/mount/image_raw`. A notebook under test has no microphone (opening one fails, as on a machine without one) and asks Gemma on a free port of its own, so it neither hears the room nor shares a `llama-server` with a notebook open on the same machine. One test speaks to the notebook: in `tests/sim/test_twin_notebook_voice.py` the kernel's microphone plays a synthetic voice in real time. It answers the notebook's "say one command" cell, then says to the console, one after the other, "give me a wave", a question, "pick up the ball", "open your hand" and "go home". Each command must run when its turn comes (the arm waves, the ball is held up, then let go, the arm is at rest), and the question must run nothing.
 
-Spoken commands are injected as text. The operator's pose and hands are scripted. The arm camera is read by YOLO on the NPU (`--sim-eyes seg` substitutes the twin's segmentation boxes). The twin stands in for the arm and its camera, and its rendering runs on the iGPU. No arm, camera, or microphone has to be attached. The ROS cases run headless on a private ROS domain, and the exit code is the result.
+In `./run_sim_tests.sh` spoken commands are injected as text, except in `tests/sim/test_voice_live.py`: there a stand-in microphone plays six sentences of a synthetic voice (espeak-ng, `libespeak-ng1`) in real time through the real listener, and a `llama-server` the test starts answers them with the real Gemma. The same file asks the real Gemma the typed stop sentences: "stop robot" in four forms must stop, and "stop", "halt", "freeze", "stop it", "abort" and "stop talking" must do nothing. The operator's pose and hands are scripted. The arm camera is read by YOLO on the NPU (`--sim-eyes seg` substitutes the twin's segmentation boxes). The twin stands in for the arm and its camera, and its rendering runs on the iGPU. No arm, camera, or microphone has to be attached. The ROS cases run headless on a private ROS domain, and the exit code is the result.
 
 Spoken commands, and how each one is checked. A cell is blank when that stack does not run the case. "Parks at rest" means the body joints finish within 4° of the rest pose.
 
 | Use case | Command | Pipeline, in process | Workshop, in process | Workshop over ROS 2 |
 |---|---|---|---|---|
 | Wave | `wave at me` | `wave` starts and ends ok. The LLM request carries a grammar and temperature 0. The elbow goes below −35° and the pan passes +20° and −20°. Parks at rest. | | Pan span is greater than 40°. |
-| Stop a wave | `wave`, then `stop` | `stop` is the keyword path: one transcript is parsed, and it is not `stop`. The elbow goal moves within 150 ms, and the pan goal does not return to ±25° after that. The wave ends stopped. Parks at rest. | | |
+| Stop a wave | `wave`, then `stop robot` | `stop` is the keyword path: one transcript is parsed, and it is not `stop`. The elbow goal moves within 150 ms, and the pan goal does not return to ±25° after that. The wave ends stopped. Parks at rest. | | |
 | Startup noise | `wave`, `thank you.`, `you`, `...` inside a 1 s grace window | Dropped as grace, then three noises. The mock LLM receives nothing. The joints stay put. | | |
 | Release | `drop it`, then `open`, then `release` | Three `release` behaviors end ok. The arm says "Released", the gripper passes 80°, and the grip lock is cleared. Parks at rest. | `drop it` only. The keyword parser also maps `release`, `open`, `drop it`, and `let go` to `release`, and `pick up the ball` to `pick_place`. One release is parsed. Same speech, gripper, lock, and park checks. | After `pick up the ball`: says "Released", gripper past 80°, and the twin's props (TF frames and `/diagnostics`) show the ball released. Joints come from `/so101/hardware/joint_states`. |
 | Go home | `go home` | From a displaced pose, `home` ends ok. Parks at rest. | | From a displaced pose, the body joints finish within 4° of rest. |
@@ -683,22 +627,20 @@ Spoken commands, and how each one is checked. A cell is blank when that stack do
 | Pick on a calibrated real arm | `pick up the ball`, with `robot.backend: real` and the twin's own camera written as `cameras.arm.intrinsics` and `extrinsics` | Default scene. The arm does not ask for a calibration. The same IK and held-out checks as the ball. `pick_place` ends ok. | | |
 | Unknown object | `pick up the pen` | The arm says "don't know what a pen looks like". A staged toothbrush is never grasped, and no prop is moved. Parks at rest. | | |
 | Bring the block | `bring me the block` | Ball staged at `block_pose`: `fetch_block` ends ok, the ball rises more than 3 cm and stays held until the gripper goal passes 90°, then it is released. Parks at rest. Ball left on the table: the arm says "couldn't get a grip", the ball is never grasped, and the arm parks. | | |
-| Copy a sweep, a pinch, and a roll | `copy my movements`, then `stop` | The pan follows the wrist across the frame: the two ends are more than 25° apart, and the goal tracks the sweep with an absolute correlation above 0.9. A pinch closes the gripper to the closed floor. Wrist roll goes both ways by more than 15°. Joints stay inside the mimic limits. Parks at rest. | | A scripted person and pinch: some body joint moves more than 2°, the grip lock is cleared, and the gripper moves more than 5°. `stop` from another thread ends the behavior, and the joints then drift less than 1°. |
-| Hand a locked grip to the pinch | `copy my movements` / `mirror my arm`, then `stop` | `copy my movements`. The arm says "Your pinch drives the gripper" and clears the grip lock. Open fingers open the gripper; a pinch closes it to the floor. | `mirror my arm`. The same checks. | |
+| Copy a sweep, a pinch, and a roll | `copy my movements`, then `stop robot` | The pan follows the wrist across the frame: the two ends are more than 25° apart, and the goal tracks the sweep with an absolute correlation above 0.9. A pinch closes the gripper to the closed floor. Wrist roll goes both ways by more than 15°. Joints stay inside the mimic limits. Parks at rest. | | A scripted person and pinch: some body joint moves more than 2°, the grip lock is cleared, and the gripper moves more than 5°. `stop` from another thread ends the behavior, and the joints then drift less than 1°. |
+| Hand a locked grip to the pinch | `copy my movements` / `mirror my arm`, then `stop robot` | `copy my movements`. The arm says "Your pinch drives the gripper" and clears the grip lock. Open fingers open the gripper; a pinch closes it to the floor. | `mirror my arm`. The same checks. | |
 | Keep a held ball until a pinch is seen | `pick up the ball`, then `copy my movements` / `mirror my arm` | The pickup grasps the ball. During mimic the gripper goal does not open before a pinch is reported, and the ball stays grasped. | `mirror my arm` for the second command. The same checks. | |
-| Hand leaves, then the person leaves | `mirror my arm`, then `stop` | With no hand, the wrist still moves the pan by more than 20°. After the person leaves, the pan goal's peak-to-peak is under 1.5°. | | |
-| Follow the nearer person | `follow me`, then `stop` | Two people are in frame. The pan goal settles above +20°, toward the nearer wrist on the left. | | |
+| Hand leaves, then the person leaves | `mirror my arm`, then `stop robot` | With no hand, the wrist still moves the pan by more than 20°. After the person leaves, the pan goal's peak-to-peak is under 1.5°. | | |
+| Follow the nearer person | `follow me`, then `stop robot` | Two people are in frame. The pan goal settles above +20°, toward the nearer wrist on the left. | | |
 | Pick the toothbrush, drop it, reset, and pick it again | `pick up the toothbrush`, `drop it`, reset, repeated three times | | Each pickup says "Got the toothbrush" and the brush is grasped. Each drop says "Released". Reset is the notebook button (`restore_twin`). | |
 
 The same command also runs these checks. None of them speak a command.
 
 | Check | How it is checked |
 |---|---|
-| NPU load order | In a fresh process, the pipeline and the workshop build YOLO-detect and then YOLO-pose. Both sessions report `VitisAIExecutionProvider`. A third case opens pose, then detect, then Whisper on the NPU and requires every session on that provider. Without the Whisper NPU cache that case is skipped. Without the YOLO caches, `VVLA_TEST_STRICT=1` fails the YOLO cases. |
-| NPU sizer | With `whisper.device: cpu`, `sizer_onnx` returns the YOLO-pose file. |
+| NPU load order | In a fresh process, the pipeline and the workshop build YOLO-detect and then YOLO-pose. Both sessions report `VitisAIExecutionProvider`. Without the YOLO caches, `VVLA_TEST_STRICT=1` fails those cases. |
 | Grasp geometry | Pipeline and workshop, for the ball and the bottle: the planned centre is within 5 mm of the object, the jaws stay clear on the way in, and the descent stays within 5 mm of vertical and 8 mm of the object. The bottle's two face gaps match within 4 mm. The ball's fixed finger is within 2 mm of `fixed_jaw_gap_m`. For a straight and a turned toothbrush, the descent clears it and the fixed finger then sits beside it. The close holds the object, eases to the hold limit before overload protection trips, and `holding()` tells a held object from empty jaws. |
 | Pickup scan | On both stacks' manipulation code: a settled frame is stored with the joints that took it. A clipped larger box loses to a usable smaller one. An ungraspable sighting, and one empty frame, do not end the sweep. The near sweep runs only when the high sweep stored nothing. An arm camera that delivers no frame ends the pick at the first pan, and the arm says the camera is offline. The ball's descent stays within 5 mm of vertical. A slipped grasp is solved again from a fresh fix. |
-| Speech front end | Synthetic blocks, with no microphone. A short command after silence is kept. A second short command 90 ms later is kept. A 120 ms click is dropped and its length is recorded. `MicListener` reports "too short to hear", "Whisper heard no words", and a block the device had to drop. |
 | Kinematics | An arm-camera box is turned into a table position and compared with where the twin put the object. A box cut by the image edge gives no fix. IK round-trips, stays on the vertical through the descent, closes across a lying object's axis, and refuses an out-of-reach target. The grasp path is deterministic. The hand-eye solve recovers a known camera mount, and the default camera model projects like the twin. The camera counts as calibrated only when both the intrinsics and the pose on the gripper are set, which is exactly when the twin's model stops standing in. |
 | Copies | Every definition the pipeline and the workshop both hold (the arm layer, the twin transport, the servo profile planner, the ros2_control client, the manipulation behaviors, the gesture mapper, the console's camera fan-out and model tap, the stop keywords) is the same code, docstrings aside, with `DirectArm` read as the workshop's `LeRobotArm`. Every top-level definition of the workshop's arm, servo profile, ros2_control and manipulation modules has a pipeline copy or a listed reason. The twin's default rest pose and jaw closed point are both stacks'. The real backend builds `DirectArm` from `robot.motor_port`, `robot_id` and `max_relative_target`. |
 | Motion | A move's servo profile stays inside the cruise and ramp torque budgets, never runs faster under more gravity, and still creeps when gravity uses the budget up. A twin move is planned from the servo setpoint, is bounded by the profile the twin computes (braking included), ends on the physics pass its servos finish, and reports where they finished; a stopped move halts where the arm is. Planned moves finish when predicted, without an overload trip. |
@@ -707,6 +649,9 @@ The same command also runs these checks. None of them speak a command.
 | Stop during the parse | In both stacks, a "stop" said while the LLM parses a command cancels that command; a "stop" said before it does not. |
 | Robot description | The ros2_control description takes each stack's `JOINT_LIMITS` through the twin's joint map; every joint turns about the twin's axis, and the controllers drive the description's joints. |
 | Pipeline over ros2_control | The twin and the pipeline's server in this process, the controllers from `launch/so101_control.launch.py`, and the pipeline's `Ros2ArmClient`: a move arrives where the trajectory ends, a stop cancels it and the arm holds, a goal tighter than one encoder step ends as blocked, streamed setpoints drive the forward controller and the trajectory controller takes over again, a scene reset leaves the trajectory controller holding the parked pose, and the gripper's current and torque limit cross the wire (N·m) unchanged. |
+| Controller bring-up | `so101_sim.controller_bringup` against a stand-in controller manager: every load, configure and activate request is sent once, in order, and the controllers end in their states. The same holds when the stand-in carries every request out and never replies. A step the stand-in refuses ends the bring-up as failed. |
+| A launch stops on SIGINT | Every launch is started through `so101_sim.ros_launch`, where Python's own SIGINT handler does nothing. With that handler in place, ROS launch gets a `KeyboardInterrupt` inside its event loop on every stop, ignores it, and can lose the callback the loop was about to run; such a launch never exits. The test reads the handler inside the launch process, sends a launch one SIGINT while it is still starting, and expects it to stop and exit 0. Started as plain `ros2 launch`, that same stop left the launch running in 12 of 12 tries. |
+| Processes die with their parent | `so101_sim.parent_death`: a command that stops on SIGINT is gone at once when its parent is killed. One that ignores SIGINT and never exits is killed 10 s later, so the promise does not rest on the command stopping. |
 | Entry points | `run_pipeline.sh --digital-twin` (with the docs tests: it needs llama-server), the workshop's `ros.node_supervisor` and `app.py --digital-twin` start the twin and its controllers and run typed commands to the end of each behavior. Killing `app.py` outright takes the twin, the controllers and every process they started with it. |
 | Servo model | Present current matches the 7.4 V STS3215 datasheet points. `Torque_Limit` changes the live cap. Writing `Max_Torque_Limit` does not. An overloaded grip is cut after the protection time and restored by the next goal. Reset reloads the gripper limit and clears a trip. Every dance keyframe holds for longer than the protection time without a trip. A hold under the threshold never trips. |
 | Reset | `SimWorld.reset` matches `mj_resetData` plus the arm pose it was given. The notebook button, the in-process pipeline console, and the `run_pipeline.sh` reset service leave one disturbed twin in the same state. |
@@ -720,9 +665,8 @@ Arguments after `./run_sim_tests.sh` select twin tests, for example `./run_sim_t
 
 All tunables live in `config/pipeline.yaml`:
 
-- **audio / audio.vad** — sample rate, silence threshold, VAD backend/hangover/pre-roll/min-speech
-- **whisper** — model variant, device, VitisAI configs, cache keys
-- **llm** — `llama-server` port (default 8081), GPU layers, ctx size, GBNF path, `hsa_override_gfx_version`
+- **gemma4-e4b-it** — GGUF, audio projector, Silero path, the utterance cut (`end_silence_ms` 300, `pre_roll_ms` 300, `window_s` 6, `min_voice_ms` 100, `min_dbfs` −60), the level an utterance is sent at (`sent_peak`, `most_gain`), `llama-server` port 8082, GPU layers, ctx size, GBNF path, `hsa_override_gfx_version`
+- **audio** — sample rate (16 kHz) and which microphone
 - **yolo_pose / yolo_detect / mediapipe** — confidence thresholds, cache keys, hand-roll cue threshold
 - **cameras** — per-role (`mount` / `arm`) device, resolution, fps, rotation, `use_ros2`, topic; legacy single `camera:` kept for one-cam dev machines
 - **robot** — `use_ros2`, `motor_port`, `robot_id`, topics, control FPS, `max_relative_target`
@@ -732,10 +676,10 @@ All tunables live in `config/pipeline.yaml`:
 ## Architecture notes
 
 - **Transport-agnostic behaviors.** Behaviors only ever talk to the `ArmClient` ABC and the `CameraClient` ABC. The same behavior code runs over ROS 2 (`Ros2ArmClient` → the ros2_control controllers → `So101ServerNode`, which exclusively owns the Feetech bus), direct serial (`DirectArm` → LeRobot `SO101Follower`, owned by a thread of the orchestrator), the digital twin (`SimArmClient`), or `DryRunArm` for development; cameras likewise over ROS 2 topics or direct V4L2. A move ends when the arm's owner reports it over (the trajectory controller's result, or the servos' `Moving` flags), and the loops that sample the arm wait for the owner's next state.
-- **Grammar-constrained intent.** llama.cpp's GBNF support means the LLM physically cannot emit anything but one of the command JSONs (`gesture_mimic`, `fetch_block`, `pick_place`, `dance`, `grip`, `release`, `wave`, `home`, `stop`, `unknown`) with an `object` slot.
+- **Grammar-constrained intent.** llama.cpp's GBNF support means Gemma physically cannot emit anything but the list `["<command>", "<object>", "<words heard>"]`, with one of the ten commands (`gesture_mimic`, `fetch_block`, `pick_place`, `dance`, `grip`, `release`, `wave`, `home`, `stop`, `unknown`) first.
 - **Registry dispatch.** The orchestrator never hardcodes behaviors; handlers register on a `CommandRegistry`, so adding a command never touches `main.py`'s dispatch loop.
 - **Grip-lock.** `grip` and `pick_place` record the held position in shared state, so a second "hold this" is refused while the arm holds something. `release` ("release", "open", "drop it") clears the lock and opens the jaws where they are. `gesture_mimic` clears it too and hands the gripper to your pinch.
-- **Safety.** All joint targets pass through `clamp_joints` against per-joint limits; `max_relative_target` bounds per-tick deltas at the LeRobot layer; "stop" is a keyword fast path that sets a shared stop event every move and wait checks (a trajectory goal is cancelled, and the arm holds where it is); `q` in any preview window and Ctrl-C are equivalent; the server node parks the arm at `REST_POSE` on any shutdown path; crashed behaviors are caught by the orchestrator, which parks the arm.
+- **Safety.** All joint targets pass through `clamp_joints` against per-joint limits; `max_relative_target` bounds per-tick deltas at the LeRobot layer; "stop robot" (Gemma's `stop` command when spoken, a keyword match when typed) is acted on before any other command and sets a shared stop event every move and wait checks (a trajectory goal is cancelled, and the arm holds where it is); `q` in any preview window and Ctrl-C are equivalent; the server node parks the arm at `REST_POSE` on any shutdown path; crashed behaviors are caught by the orchestrator, which parks the arm.
 
 ## Troubleshooting
 
@@ -748,11 +692,12 @@ All tunables live in `config/pipeline.yaml`:
 - **Camera preview shows "no frames — camera offline"** — with `use_ros2: true` the preview *subscribes* to a topic, so it needs the camera node publishing. Start the nodes (`./run_pipeline.sh` or `python -m vla_pipeline.vision.camera_node --role mount`), or test the raw device directly by setting that role's `use_ros2: false`. Confirm the device captures at all with `v4l2-ctl -d <by-id path> --list-formats-ext`.
 - **Two identical USB cameras swap on reboot** — use the stable `/dev/v4l/by-id/...-video-index0` symlink (the `-index0` node is the capture node) for `cameras.*.device` instead of a numeric index.
 - **llama-server fails to start** — check `third_party/llama.cpp/build/bin/llama-server` exists; rebuild with `./bootstrap.sh --skip-apt --skip-models`. On failure the last 20 lines of `logs/llama-server.log` are printed.
-- **llama-server segfaults with `cudaMalloc failed: out of memory`** — the KV cache overflowed the iGPU VRAM carve-out. Keep `llm.ctx_size` capped (2048) and `llm.parallel: 1`; never run the server with an uncapped context on Strix Halo. If still tight, lower `n_gpu_layers`, or raise the UMA/VRAM split in BIOS.
-- **llama-server segfaults during "warming up the model"** — a gfx1151 ROCm kernel-dispatch issue. The pipeline sets `HSA_OVERRIDE_GFX_VERSION` automatically; if it persists, set `llm.no_warmup: true`.
+- **llama-server segfaults with `cudaMalloc failed: out of memory`** — the KV cache overflowed the iGPU VRAM carve-out. Keep `gemma4-e4b-it.ctx_size` capped (2048) and `gemma4-e4b-it.parallel: 1`; never run the server with an uncapped context on Strix Halo. If still tight, lower `n_gpu_layers`, or raise the UMA/VRAM split in BIOS.
+- **llama-server segfaults during "warming up the model"** — a gfx1151 ROCm kernel-dispatch issue. The pipeline sets `HSA_OVERRIDE_GFX_VERSION` automatically; if it persists, set `gemma4-e4b-it.no_warmup: true`.
 - **Arm doesn't move** — verify `motor_port` permissions and that your calibration JSON matches `robot_id`.
 - **`ControllerArm` times out waiting for the controllers** — `ros2 control list_controllers` should show `arm_controller`, `gripper_forward_controller` and `joint_state_broadcaster` active. `ros_ws/install/topic_based_ros2_control is missing` means the hardware plugin was never built: rerun `./bootstrap.sh` (section 4e). `./scripts/validate_setup.sh` checks ROS 2, ros2_control and the plugin.
 - **Gripper trips `Overload error` on shutdown** — usually a side effect of an abnormal exit while the arm was parking; once the run exits cleanly it goes away. If it recurs, power-cycle the servo bus to clear the overload latch before the next run.
-- **Voice latency feels high / onsets clipped** — `uv pip install webrtcvad` for the better VAD backend; tune `audio.vad.hangover_s` and `pre_roll_s`.
+- **A sentence is cut in two, or the arm feels late** — a sentence is sent once the speaker has been silent for `gemma4-e4b-it.end_silence_ms` (300). Raising it waits longer after the last word; lowering it sends sooner and cuts a sentence at a shorter pause (a pause after a comma is 220 to 260 ms). The log line "Command … N s after the end of the speech" gives the time of every command. The samples are not denoised; a second person talking is speech and is sent with the command.
+- **Speech is not picked up in a loud room, or the room is taken for speech** — `gemma4-e4b-it.min_dbfs` (−60) leaves the decision to Silero. Raise it only where the room is loud; a quiet microphone's speech frames are around −43 dBFS.
 - **Gripper drops thin objects** — raise `grip.stall_grace_s` and/or lower `grip.load_threshold`; verify effort feedback with `python -m vla_pipeline.robot.arm_interface --dry-run` (prints whether the gripper load register is readable).
 - **Arm camera image is sideways** — set `cameras.arm.rotate` (0/90/180/270) to match the end-effector mounting.

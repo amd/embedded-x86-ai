@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vvla-pipeline"
+version = "0.1.0"
+description = "Voice-driven SO-101 pipeline on Ryzen AI, and the workshop that teaches it"
+requires-python = ">=3.10"
+license = { text = "BSD-3-Clause" }
+
+[tool.setuptools.packages.find]
+include = ["vla_pipeline*"]

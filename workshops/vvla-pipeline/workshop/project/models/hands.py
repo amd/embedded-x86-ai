@@ -8,7 +8,7 @@
 """MediaPipe Hands on the CPU - the pinch/roll/depth sense.
 
 Why the CPU? Budget arithmetic: the NPU is saturated by the two YOLO models
-(camera-rate pose is latency-critical), the iGPU belongs to Llama, and
+(camera-rate pose is latency-critical), the iGPU belongs to Gemma, and
 MediaPipe Hands is cheap enough that the CPU runs it at frame rate. Placing
 a model is a *decision*, and this is the CPU leg of it.
 

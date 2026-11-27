@@ -3,20 +3,20 @@
 A 3-hour workshop that takes a CS/engineering student from zero to a
 running **vision -> language -> action** pipeline on an AMD Ryzen AI
 APU driving a LeRobot SO-101 arm: YOLOv26s x2 on the **NPU** (VitisAI EP),
-Whisper on the **CPU**, Llama 3.2 3B on the **iGPU** (llama.cpp + ROCm),
-MediaPipe Hands on the **CPU**, all wired over **ROS 2**.
+Gemma 4 E4B on the **iGPU** (llama.cpp + ROCm, one spoken sentence at a time),
+Silero on the **CPU**, MediaPipe Hands on the **CPU**, all wired over **ROS 2**.
 
 The workshop depends on [Installation](../README.md#installation). That
 creates `.venv`, the model files in `../models`, and the YOLO NPU compile
-cache in `../cache`. The two YOLO models load from that cache. Whisper
-runs on the CPU.
+cache in `../cache`. The two YOLO models load from that cache. Gemma 4
+and Silero are downloaded by `scripts/ensure_voice.sh`.
 
 ## What's in the box
 
 ```
 notebooks/               phase 1 - read & run these first (each is self-contained)
-  01_ai_models/          NPU session factory - MediaPipe on CPU - Llama on iGPU
-  02_ros2/               camera nodes/clients - SO-101 server/client - Llama intent node
+  01_ai_models/          NPU session factory - MediaPipe on CPU - Gemma 4 on iGPU
+  02_ros2/               camera nodes/clients - SO-101 server/client - Gemma intent node
   03_integration/        registry dispatch - the mimic composition - the live UI -
                          the digital twin (MuJoCo arm, cameras, grasp; live console over ROS 2)
 common/                  PROVIDED helpers (imaging, motion, ROS codecs, fixtures,
@@ -41,15 +41,16 @@ Before the steps below, install the Ryzen AI SDK and prerequisites as described 
 ```bash
 cd workshop
 ./run_notebooks.sh                        # registers the kernel, installs missing
-                                          # deps, starts the llama server and the
-                                          # resource HUD, then serves Jupyter Lab.
-                                          # This shell stays here until you quit it.
+                                          # deps, checks the Gemma 4 files, starts
+                                          # the twin and the resource HUD, then
+                                          # serves Jupyter Lab. This shell stays
+                                          # here until you quit it.
 ```
 
 Jupyter opens `notebooks/`. Read and run them in order: `01_ai_models`,
 `02_ros2`, `03_integration`.
 
-The `02_ros2` notebooks and section 5 of `03_integration/02_digital_twin.ipynb` import `rclpy`. `bootstrap.sh` installs ROS 2 Jazzy and creates `.venv` with `--system-site-packages`. `./run_notebooks.sh` sources `/opt/ros/jazzy/setup.bash` before Jupyter starts.
+The `02_ros2` notebooks and section 4 of `03_integration/02_digital_twin.ipynb` import `rclpy`. `bootstrap.sh` installs ROS 2 Jazzy and creates `.venv` with `--system-site-packages`. `./run_notebooks.sh` sources `/opt/ros/jazzy/setup.bash` before Jupyter starts.
 
 After the notebooks, the TODOs are in `project/`. Follow [project/README.md](project/README.md).
 
@@ -89,9 +90,10 @@ headless, after the same setup as the happy path. See
 AMD-specific lessons for the session:
 
 **Choose the device on purpose.** YOLO-pose and YOLO-detect already fill
-the NPU. Another model, such as Whisper, can run on the CPU while those
-two stay there. Pass `device="cpu"` or `device="npu"`, then print the
-provider the session got in order to verify where it landed.
+the NPU. Gemma 4 stays on the iGPU and Silero stays on the CPU, so those
+two vision models keep the NPU. Pass `device="cpu"` or `device="npu"` for
+a vision session, then print the provider it got in order to verify where
+it landed.
 
 Generated dirs (`_artifacts/`, `logs/`, `__pycache__/`) are disposable -
 see `.gitignore`.

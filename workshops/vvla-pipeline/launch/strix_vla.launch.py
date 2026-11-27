@@ -33,7 +33,10 @@ import sys
 from pathlib import Path
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler,
+)
+from launch.event_handlers import OnProcessIO
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
@@ -68,12 +71,31 @@ def _arm(context):
         cmd = [PY, "-m", "vla_pipeline.robot.robot_node", "--server", *(["--dry-run"] if dry_run else []),
                "--config", config]
         name = "so101_server_dry" if dry_run else "so101_server"
+    # The hardware side waits SERVER_START_S from the moment it activates. That
+    # clock used to start with the launch, while this process was still importing,
+    # so a slow start expired it and /joint_states never appeared. The controllers
+    # are included when this process logs that it is publishing.
+    server = ExecuteProcess(cmd=[*cmd, *remaps], cwd=str(REPO_ROOT), output="screen", name=name)
+    controllers = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(str(LAUNCH_FILE)),
+        launch_arguments={"config": config, "stack": "pipeline"}.items(),
+    )
+    armed = False
+
+    def _when_publishing(event):
+        nonlocal armed
+        if armed or b"Ready - cmd:" not in event.text:
+            return None
+        armed = True
+        return [controllers]
+
     return [
-        ExecuteProcess(cmd=[*cmd, *remaps], cwd=str(REPO_ROOT), output="screen", name=name),
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(str(LAUNCH_FILE)),
-            launch_arguments={"config": config, "stack": "pipeline"}.items(),
-        ),
+        server,
+        RegisterEventHandler(OnProcessIO(
+            target_action=server,
+            on_stdout=_when_publishing,
+            on_stderr=_when_publishing,
+        )),
     ]
 
 

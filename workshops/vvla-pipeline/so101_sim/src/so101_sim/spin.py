@@ -9,6 +9,18 @@
 
 from __future__ import annotations
 
+import signal
+
+
+def _ignore_further_sigint() -> None:
+    """A second SIGINT must not kill the process while it releases its device.
+
+    The launch forwards its own SIGINT after the one that stopped the spin.
+    With the default disposition restored, that signal kills the process
+    before the camera is released or the arm server closes the bus.
+    """
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
 
 def spin_until_shutdown(executor) -> None:
     """``executor.spin()`` until the process is told to stop.
@@ -25,7 +37,8 @@ def spin_until_shutdown(executor) -> None:
     try:
         executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException):
-        pass
+        _ignore_further_sigint()
     except Exception:
         if executor.context.ok():
             raise
+        _ignore_further_sigint()

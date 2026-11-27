@@ -28,6 +28,7 @@ from common.imaging import (decode_detections, decode_pose, draw_detections,
                             draw_skeleton, letterbox, pick_nearest,
                             resolve_class)
 from models.npu import build_npu_session, report_placement
+from vla_pipeline.utils.npu_session import run_session
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,7 @@ class PoseEstimator:
         """→ ``boxes [N,4]``, ``scores [N]``, ``kpts [N,17,3]`` (orig pixels)."""
         conf = self.conf_threshold if conf is None else conf
         nchw, info = letterbox(frame_bgr, self.imgsz)
-        outputs = self.session.run(None, {self.input_name: nchw})
+        outputs = run_session(self.session, None, {self.input_name: nchw})
         return decode_pose(outputs, info, frame_bgr.shape, conf)
 
     def primary_person(self, frame_bgr):
@@ -129,7 +130,7 @@ class ObjectDetector:
         """Run the detector and decode raw outputs into detections for this frame."""
         conf = self.conf_threshold if conf is None else conf
         nchw, info = letterbox(frame_bgr, self.imgsz)
-        outputs = self.session.run(None, {self.input_name: nchw})
+        outputs = run_session(self.session, None, {self.input_name: nchw})
         return decode_detections(outputs, info, frame_bgr.shape, conf)
 
     def find(self, frame_bgr, spoken_name: str, conf=None):

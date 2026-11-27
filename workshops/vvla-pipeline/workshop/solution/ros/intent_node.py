@@ -5,7 +5,7 @@
 # Portions of this file consist of AI-generated content. AI-assisted
 # content has been reviewed and validated by the authors.
 
-"""The Llama intent node - language as a ROS 2 citizen.
+"""The Gemma intent node - language as a ROS 2 citizen.
 
 This node closes the loop between component 1 and component 2: transcripts
 arrive as ``std_msgs/String`` on ``/vla/transcript`` (from the speech stack,
@@ -57,7 +57,7 @@ class IntentNode(Node):
     """Subscribes to transcripts, publishes grammar-shaped intent JSON.
 
     ``parser`` is injected: any callable ``str -> ParsedCommand``. On the rig
-    that's :meth:`models.llm.LlamaIntentParser.parse` (Llama on the iGPU);
+    that's :meth:`models.llm.LlamaIntentParser.parse` (Gemma 4 on the iGPU);
     in tests it's a keyword stand-in. The node doesn't know or care - which
     is exactly why it's a clean seam.
     """
@@ -119,7 +119,7 @@ class IntentNode(Node):
 
 
 def main() -> None:
-    """CLI: bring up the intent node (mock or Llama-backed) and spin until interrupted."""
+    """CLI: bring up the intent node (mock or Gemma-backed) and spin until interrupted."""
     logging.basicConfig(
         level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
     )
@@ -128,7 +128,7 @@ def main() -> None:
             "rclpy not importable - source ROS 2 before running "
             "(offline checks: python -m ros.selftest)"
         )
-    parser = argparse.ArgumentParser(description="Llama intent node")
+    parser = argparse.ArgumentParser(description="Gemma intent node")
     parser.add_argument("--config", default=None)
     parser.add_argument(
         "--mock",

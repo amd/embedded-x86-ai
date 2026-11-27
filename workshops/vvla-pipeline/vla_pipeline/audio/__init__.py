@@ -5,4 +5,4 @@
 # Portions of this file consist of AI-generated content. AI-assisted
 # content has been reviewed and validated by the authors.
 
-"""Audio capture, voice activity detection, and Whisper-on-NPU transcription."""
+"""Microphone windows for the Gemma 4 voice path."""
